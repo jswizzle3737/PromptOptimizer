@@ -1,0 +1,100 @@
+{
+  "manifest_version": 3,
+  "name": "PromptOptimizer",
+  "version": "1.2.0",
+  "description": "Turn rough prompts into structured, high-performance ones, right inside ChatGPT, Claude, Gemini, Perplexity, Grok, Copilot and more.",
+  "icons": {
+    "16": "icons/icon-16.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_title": "PromptOptimizer",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "48": "icons/icon-48.png",
+      "128": "icons/icon-128.png"
+    }
+  },
+  "background": {
+    "service_worker": "background/service-worker.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*",
+        "https://claude.ai/*",
+        "https://gemini.google.com/*",
+        "https://www.perplexity.ai/*",
+        "https://chat.deepseek.com/*",
+        "https://chat.mistral.ai/*",
+        "https://grok.com/*",
+        "https://copilot.microsoft.com/*",
+        "https://poe.com/*"
+      ],
+      "js": [
+        "content/content.js"
+      ],
+      "css": [
+        "content/content.css"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "commands": {
+    "open-optimizer": {
+      "suggested_key": {
+        "default": "Alt+O"
+      },
+      "description": "Open the PromptOptimizer optimizer"
+    }
+  },
+  "options_ui": {
+    "page": "options/options.html",
+    "open_in_tab": true
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "shared/theme.css",
+        "shared/base.css",
+        "shared/components.css",
+        "shared/icons.js",
+        "shared/select.js",
+        "shared/theme-picker.js",
+        "shared/engines.js",
+        "shared/library.js",
+        "shared/save-sheet.js",
+        "shared/run-client.js",
+        "shared/assist.js",
+        "shared/secrets.js",
+        "shared/clarify.js",
+        "shared/templates.js",
+        "assets/logo.png"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
+    }
+  ],
+  "permissions": [
+    "storage",
+    "contextMenus",
+    "activeTab",
+    "scripting",
+    "offscreen"
+  ],
+  "host_permissions": [
+    "https://generativelanguage.googleapis.com/*",
+    "https://api.openai.com/*",
+    "https://api.anthropic.com/*",
+    "https://openrouter.ai/*"
+  ],
+  "optional_host_permissions": [
+    "https://*/*",
+    "http://*/*"
+  ]
+}

@@ -1,0 +1,6 @@
+# Build output (node package.mjs)
+dist/
+
+# Scratch logs from past test runs
+.research/*.log
+.research/test-*.txt

@@ -1,0 +1,421 @@
+/* ==========================================================================
+   PromptOptimizer — Popup Surface
+   Layout only. Every color resolves to a token from shared/theme.css.
+   ========================================================================== */
+
+body {
+  width: 440px;
+  min-height: 480px;
+  max-height: 600px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* --------------------------------------------------------------------------
+   App bar
+   -------------------------------------------------------------------------- */
+.pc-appbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-shrink: 0;
+  height: 46px;
+  padding: 0 var(--space-4);
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.pc-brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.pc-brand__mark {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: var(--text-on-accent);
+  box-shadow: var(--shadow-accent);
+}
+
+.pc-brand__name {
+  font-size: var(--text-md);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-tight);
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+
+.pc-appbar__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* The design control is the compact picker from createThemeMenu(): a swatch
+   in the app bar that opens a named list of all ten designs. Same control as
+   the labelled one in the Options console, in 40px instead of 160px. */
+
+/* --------------------------------------------------------------------------
+   Framework bar
+   -------------------------------------------------------------------------- */
+.pc-frameworkbar {
+  flex-shrink: 0;
+  padding: var(--space-3) var(--space-4);
+  background: var(--bg-canvas);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.pc-frameworkbar .pc-segmented {
+  width: 100%;
+}
+
+/* --------------------------------------------------------------------------
+   Main
+   -------------------------------------------------------------------------- */
+.pc-main {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-4);
+}
+
+.pc-meter {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.pc-textarea {
+  font-size: var(--text-base);
+}
+
+/* Engine select + primary action */
+.pc-controls {
+  display: flex;
+  align-items: stretch;
+  gap: var(--space-2);
+}
+
+.pc-controls__engine {
+  flex: 1;
+  min-width: 0;
+}
+
+.pc-controls .pc-btn--primary {
+  flex-shrink: 0;
+}
+
+/* --------------------------------------------------------------------------
+   Output
+   -------------------------------------------------------------------------- */
+/* The output box shows the whole result and runs all the way down; the page
+   scrolls to reach the end of it. It used to be capped at 210px with its own
+   scrollbar, and its section could collapse (`min-height: 0`) while the box kept
+   its minimum, so the box spilled underneath the status bar. Now the section
+   keeps its natural height, the box grows with its text (never below 132px, and
+   it takes any spare room), and the status bar stays pinned, below). */
+.pc-output {
+  flex: 1 1 auto;
+}
+
+.pc-output__box {
+  flex: 1 0 auto;
+  min-height: 132px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+}
+
+.pc-output__text {
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
+  line-height: var(--leading-relaxed);
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* --------------------------------------------------------------------------
+   Status bar
+   -------------------------------------------------------------------------- */
+/* Pinned to the bottom edge of the scrolling area, so Save and Copy stay in
+   reach however long the result is. The negative margins let its background run
+   edge to edge across the padding of .pc-main. */
+.pc-statusbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-shrink: 0;
+  position: sticky;
+  bottom: calc(var(--space-4) * -1);
+  z-index: var(--z-sticky);
+  margin: 0 calc(var(--space-4) * -1);
+  padding: var(--space-3) var(--space-4);
+  background: var(--bg-surface);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.pc-statusbar__state {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  min-width: 0;
+}
+
+.pc-statusbar__state > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pc-statusbar__right {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
+}
+
+/* --------------------------------------------------------------------------
+   History
+   -------------------------------------------------------------------------- */
+.pc-history {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  overflow: hidden;
+}
+
+.pc-history__head {
+  flex-shrink: 0;
+}
+
+.pc-history__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.pc-history__item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-3);
+  background: var(--bg-sunken);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition:
+    background-color var(--dur-fast) var(--ease-standard),
+    border-color var(--dur-fast) var(--ease-standard);
+}
+
+.pc-history__item:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
+.pc-history__item:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 1px;
+}
+
+.pc-history__meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-wide);
+}
+
+.pc-history__preview {
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pc-history__rule {
+  flex: 1;
+  height: 1px;
+  background: var(--border-subtle);
+}
+
+/* --------------------------------------------------------------------------
+   Shortcut hint
+   Sits directly under the control it triggers, and names that action.
+   -------------------------------------------------------------------------- */
+.pc-site {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-shrink: 0;
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border-subtle);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+
+.pc-site__text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pc-shortcut-hint {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  margin-top: calc(var(--space-2) * -1);
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
+
+/* --------------------------------------------------------------------------
+   Callout body — shared/components.css owns the frame, this is the inner stack
+   -------------------------------------------------------------------------- */
+.pc-callout__body {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.pc-callout__text {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  line-height: var(--leading-normal);
+  overflow-wrap: anywhere;
+}
+
+.pc-callout__body .pc-btn { margin-top: var(--space-1); }
+
+/* --------------------------------------------------------------------------
+   Onboarding — first run only
+   -------------------------------------------------------------------------- */
+.pc-onboarding {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-5) var(--space-4);
+}
+
+.pc-onboarding__title {
+  font-size: var(--text-lg);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-tight);
+  line-height: var(--leading-tight);
+  color: var(--text-primary);
+}
+
+.pc-onboarding__lede {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  line-height: var(--leading-normal);
+}
+
+.pc-onboarding__steps {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.pc-onboarding__step {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+}
+
+.pc-onboarding__num {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-full);
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-border);
+  color: var(--accent-fg);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-semibold);
+}
+
+.pc-onboarding__step-title {
+  display: block;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--text-primary);
+}
+
+.pc-onboarding__step-desc {
+  display: block;
+  margin-top: 2px;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  line-height: var(--leading-normal);
+}
+
+.pc-onboarding__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: auto;
+  padding-top: var(--space-2);
+}
+
+/* The slot only exists to hold the save sheet. As `contents` it adds no row of
+   its own, so a closed sheet leaves no extra gap above the status bar. */
+#save-slot { display: contents; }
+
+/* Engine setup card ---------------------------------------------------- */
+.pc-setup[hidden] { display: none; }
+.pc-setup__body { width: 100%; }
+.pc-setup__row {
+  display: flex;
+  gap: var(--space-2);
+  width: 100%;
+  align-items: center;
+}
+.pc-setup__provider { flex: 0 0 156px; min-width: 0; }
+.pc-setup__row .pc-input { flex: 1; min-width: 0; height: 32px; }
+.pc-setup__row--actions { justify-content: flex-end; }
+.pc-setup__link {
+  margin-right: auto;
+  font-size: var(--text-xs);
+  color: var(--accent-fg);
+}
+#setup-download-btn[hidden] { display: none; }

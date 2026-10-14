@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PromptOptimizer · Settings</title>
+  <link rel="stylesheet" href="../shared/theme.css">
+  <link rel="stylesheet" href="../shared/base.css">
+  <link rel="stylesheet" href="../shared/components.css">
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+
+  <div class="pc-lockup">
+    <img class="pc-lockup__logo" src="../assets/logo.png" alt="">
+    <span class="pc-lockup__word">yourlegalaid</span>
+  </div>
+
+  <header class="pc-appbar">
+    <div class="pc-brand">
+      <span class="pc-brand__mark" data-icon="wand" data-icon-size="16"></span>
+      <span>
+        <span class="pc-brand__name">PromptOptimizer</span>
+        <span class="pc-brand__sub">Settings</span>
+      </span>
+    </div>
+
+    <div class="pc-appbar__actions">
+      <span class="pc-appbar__status">
+        <span class="pc-status-dot pc-status-dot--success"></span>
+        <span>Saved locally</span>
+      </span>
+      <button type="button" id="save-btn" class="pc-btn pc-btn--primary pc-btn--md">
+        <span data-icon="save" data-icon-size="14"></span>
+        <span>Save changes</span>
+      </button>
+    </div>
+  </header>
+
+  <div class="pc-shell">
+
+    <!-- ── Sidebar ──────────────────────────────────────────────── -->
+    <aside class="pc-sidebar">
+      <nav class="pc-nav" aria-label="Settings sections">
+        <span class="pc-label pc-nav__heading">Settings</span>
+        <a href="#sec-appearance" class="pc-nav__item is-active">
+          <span data-icon="palette"></span><span>Appearance</span>
+        </a>
+        <a href="#sec-engine" class="pc-nav__item">
+          <span data-icon="cpu"></span><span>Engine</span>
+        </a>
+        <a href="#sec-keys" class="pc-nav__item">
+          <span data-icon="key"></span><span>API keys</span>
+        </a>
+        <a href="#sec-guidelines" class="pc-nav__item">
+          <span data-icon="sliders"></span><span>Guidelines</span>
+        </a>
+        <a href="#sec-frameworks" class="pc-nav__item">
+          <span data-icon="layers"></span><span>Frameworks</span>
+        </a>
+        <a href="#sec-library" class="pc-nav__item">
+          <span data-icon="bookmark"></span><span>Library</span>
+        </a>
+      </nav>
+
+      <div class="pc-callout pc-callout--accent pc-sidebar__note">
+        <span class="pc-callout__icon" data-icon="shield" data-icon-size="15"></span>
+        <span>
+          <span class="pc-callout__title">Private by default</span>
+          Keys, frameworks, saved prompts, and history stay in local extension storage. Nothing is transmitted to us.
+        </span>
+      </div>
+    </aside>
+
+    <!-- ── Content ──────────────────────────────────────────────── -->
+    <main class="pc-content">
+
+      <!-- Appearance -->
+      <section class="pc-section" id="sec-appearance">
+        <header class="pc-section__head">
+          <h2>Appearance</h2>
+          <p>Applies instantly across the popup, this console, and the in-page optimizer.</p>
+        </header>
+
+        <div class="pc-card">
+          <div class="pc-field pc-field--row">
+            <div class="pc-field__text">
+              <label class="pc-field__label" id="theme-label">Interface design</label>
+              <span class="pc-field__hint">Fifteen designs, each with its own palette, type and corners. All meet WCAG AA contrast. Applies immediately — no save needed.</span>
+            </div>
+            <div class="pc-theme-slot" id="theme-picker-slot"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Engine -->
+      <section class="pc-section" id="sec-engine">
+        <header class="pc-section__head">
+          <h2>Engine</h2>
+          <p>Defaults used when the popup or in-page optimizer opens.</p>
+        </header>
+
+        <div class="pc-card">
+          <div class="pc-grid-2">
+            <div class="pc-field">
+              <label class="pc-field__label" id="engine-label">Default engine</label>
+              <div id="preferred-engine-slot"></div>
+              <span class="pc-field__hint">Chrome Nano and Offline need no key. Cloud engines use the keys you add below.</span>
+            </div>
+
+            <div class="pc-field">
+              <label class="pc-field__label" id="framework-label">Default framework</label>
+              <div id="preferred-framework-slot"></div>
+              <span class="pc-field__hint">The optimizer preset selected on open.</span>
+            </div>
+          </div>
+
+          <hr class="pc-divider">
+
+          <div class="pc-callout pc-callout--warning" id="nano-status-banner">
+            <span class="pc-callout__icon" data-icon="cpu" data-icon-size="15"></span>
+            <span>
+              <span class="pc-callout__title">Chrome built-in Prompt API</span>
+              <span id="nano-status-text">Checking status…</span>
+              <span id="nano-instructions" class="pc-nano-help" hidden>
+                <ol>
+                  <li>Open <code>chrome://flags/#prompt-api-for-gemini-nano</code> → <strong>Enabled</strong>.</li>
+                  <li>Open <code>chrome://flags/#optimization-guide-on-device-model</code> → <strong>Enabled BypassPerfRequirement</strong>.</li>
+                  <li>Relaunch Chrome, then check <code>chrome://components</code> for <strong>Optimization Guide On Device Model</strong>.</li>
+                </ol>
+              </span>
+            </span>
+          </div>
+        </div>
+      </section>
+
+      <!-- API keys -->
+      <section class="pc-section" id="sec-keys">
+        <header class="pc-section__head">
+          <h2>API keys</h2>
+          <p>Bring your own key for any provider. Keys are stored locally and sent only to the provider they belong to.</p>
+        </header>
+
+        <div class="pc-card">
+          <div class="pc-keyrow">
+            <div class="pc-keyrow__head">
+              <span class="pc-keyrow__title">
+                <span data-icon="branch" data-icon-size="14"></span> OpenRouter
+              </span>
+            </div>
+            <div class="pc-field">
+              <label class="pc-field__label" for="openrouter-api-key">API key</label>
+              <div class="pc-input-group">
+                <input type="password" id="openrouter-api-key" class="pc-input pc-input--mono" placeholder="sk-or-…" autocomplete="off">
+                <button type="button" class="pc-btn pc-btn--secondary pc-btn--sm" data-api="openrouter">Test</button>
+              </div>
+            </div>
+            <div class="pc-grid-2">
+              <div class="pc-field">
+                <div class="pc-field__row">
+                  <label class="pc-field__label" for="openrouter-model-select">Free model</label>
+                  <button type="button" id="fetch-openrouter-free-models-btn" class="pc-linkbtn">
+                    <span data-icon="refresh" data-icon-size="12"></span> Fetch live models
+                  </button>
+                </div>
+                <div id="openrouter-model-slot"></div>
+              </div>
+              <div class="pc-field">
+                <label class="pc-field__label" for="openrouter-model">Model ID</label>
+                <input type="text" id="openrouter-model" class="pc-input pc-input--mono" placeholder="openrouter/free">
+              </div>
+            </div>
+          </div>
+
+          <hr class="pc-divider">
+
+          <div class="pc-keyrow">
+            <div class="pc-keyrow__head">
+              <span class="pc-keyrow__title">
+                <span data-icon="cloud" data-icon-size="14"></span> Google Gemini
+              </span>
+              <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener" class="pc-linkbtn">
+                Get key <span data-icon="external" data-icon-size="11"></span>
+              </a>
+            </div>
+            <div class="pc-grid-2">
+              <div class="pc-field">
+                <label class="pc-field__label" for="gemini-api-key">API key</label>
+                <div class="pc-input-group">
+                  <input type="password" id="gemini-api-key" class="pc-input pc-input--mono" placeholder="AIzaSy…" autocomplete="off">
+                  <button type="button" class="pc-btn pc-btn--secondary pc-btn--sm" data-api="gemini">Test</button>
+                </div>
+              </div>
+              <div class="pc-field">
+                <label class="pc-field__label" for="gemini-model">Model</label>
+                <input type="text" id="gemini-model" class="pc-input pc-input--mono">
+              </div>
+            </div>
+          </div>
+
+          <hr class="pc-divider">
+
+          <div class="pc-keyrow">
+            <div class="pc-keyrow__head">
+              <span class="pc-keyrow__title">
+                <span data-icon="cloud" data-icon-size="14"></span> OpenAI
+              </span>
+              <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener" class="pc-linkbtn">
+                Get key <span data-icon="external" data-icon-size="11"></span>
+              </a>
+            </div>
+            <div class="pc-grid-2">
+              <div class="pc-field">
+                <label class="pc-field__label" for="openai-api-key">API key</label>
+                <div class="pc-input-group">
+                  <input type="password" id="openai-api-key" class="pc-input pc-input--mono" placeholder="sk-proj-…" autocomplete="off">
+                  <button type="button" class="pc-btn pc-btn--secondary pc-btn--sm" data-api="openai">Test</button>
+                </div>
+              </div>
+              <div class="pc-field">
+                <label class="pc-field__label" for="openai-model">Model</label>
+                <input type="text" id="openai-model" class="pc-input pc-input--mono">
+              </div>
+            </div>
+          </div>
+
+          <hr class="pc-divider">
+
+          <div class="pc-keyrow">
+            <div class="pc-keyrow__head">
+              <span class="pc-keyrow__title">
+                <span data-icon="cloud" data-icon-size="14"></span> Anthropic Claude
+              </span>
+              <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener" class="pc-linkbtn">
+                Get key <span data-icon="external" data-icon-size="11"></span>
+              </a>
+            </div>
+            <div class="pc-grid-2">
+              <div class="pc-field">
+                <label class="pc-field__label" for="anthropic-api-key">API key</label>
+                <div class="pc-input-group">
+                  <input type="password" id="anthropic-api-key" class="pc-input pc-input--mono" placeholder="sk-ant-…" autocomplete="off">
+                  <button type="button" class="pc-btn pc-btn--secondary pc-btn--sm" data-api="anthropic">Test</button>
+                </div>
+              </div>
+              <div class="pc-field">
+                <label class="pc-field__label" for="anthropic-model">Model</label>
+                <input type="text" id="anthropic-model" class="pc-input pc-input--mono">
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Guidelines -->
+      <section class="pc-section" id="sec-guidelines">
+        <header class="pc-section__head">
+          <h2>Guidelines</h2>
+          <p>Rules injected into every optimization, plus local behavior preferences.</p>
+        </header>
+
+        <div class="pc-card">
+          <div class="pc-field">
+            <label class="pc-field__label" for="custom-system-prompt">Global engineering rules</label>
+            <textarea id="custom-system-prompt" class="pc-textarea" rows="4"
+              placeholder="e.g. Always request TypeScript with strict typing. Require step-by-step test coverage. Enforce JSON schemas for data queries."></textarea>
+            <span class="pc-field__hint">Appended to the optimizer's system prompt on every run.</span>
+          </div>
+
+          <hr class="pc-divider">
+
+          <div class="pc-grid-2">
+            <div class="pc-field">
+              <label class="pc-field__label" for="max-history">History entries kept</label>
+              <input type="number" id="max-history" class="pc-input" value="20" min="5" max="100">
+              <span class="pc-field__hint">Older entries are dropped automatically.</span>
+            </div>
+
+            <div class="pc-field">
+              <span class="pc-field__label">In-page trigger</span>
+              <label class="pc-switch">
+                <input type="checkbox" id="enable-floating-widget">
+                <span class="pc-switch__track"><span class="pc-switch__thumb"></span></span>
+                <span class="pc-switch__label">Show the floating optimizer pill beside chat inputs</span>
+              </label>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Frameworks -->
+      <section class="pc-section" id="sec-frameworks">
+        <header class="pc-section__head">
+          <h2>Frameworks</h2>
+          <p>Edit presets or build your own optimizer personas.</p>
+        </header>
+
+        <div class="pc-card">
+          <div class="pc-card__header">
+            <div>
+              <span class="pc-card__title">
+                <span data-icon="layers" data-icon-size="15"></span> Optimizer types
+              </span>
+              <p class="pc-card__desc">Each type defines how a raw prompt is rewritten and structured.</p>
+            </div>
+            <div class="pc-btnrow">
+              <button type="button" id="reset-frameworks-btn" class="pc-btn pc-btn--secondary pc-btn--sm">
+                <span data-icon="reset" data-icon-size="13"></span> Reset
+              </button>
+              <button type="button" id="add-framework-btn" class="pc-btn pc-btn--primary pc-btn--sm">
+                <span data-icon="plus" data-icon-size="13"></span> New type
+              </button>
+            </div>
+          </div>
+
+          <div class="pc-frameworks" id="frameworks-list"></div>
+        </div>
+      </section>
+
+      <!-- Library -->
+      <section class="pc-section" id="sec-library">
+        <header class="pc-section__head">
+          <h2>Library</h2>
+          <p>Prompts you have saved, with a name and labels. Save one from the popup or the in-page optimizer, or add your own here.</p>
+        </header>
+
+        <div class="pc-card">
+          <div class="pc-card__header">
+            <div>
+              <span class="pc-card__title">
+                <span data-icon="bookmark" data-icon-size="15"></span> Saved prompts
+              </span>
+              <p class="pc-card__desc" id="library-summary"></p>
+            </div>
+            <div class="pc-btnrow">
+              <button type="button" id="add-prompt-btn" class="pc-btn pc-btn--primary pc-btn--sm">
+                <span data-icon="plus" data-icon-size="13"></span> New prompt
+              </button>
+            </div>
+          </div>
+
+          <div class="pc-searchbox">
+            <span class="pc-searchbox__icon" data-icon="search" data-icon-size="14"></span>
+            <input type="search" id="library-search" class="pc-input"
+                   placeholder="Search names, text and labels" aria-label="Search saved prompts" autocomplete="off">
+          </div>
+
+          <div class="pc-library__labels" id="library-labels" role="group" aria-label="Filter by label"></div>
+
+          <div class="pc-library" id="library-list"></div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- ── Framework editor ────────────────────────────────────────── -->
+  <div class="pc-backdrop" id="framework-modal-backdrop" hidden>
+    <div class="pc-modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+      <div class="pc-modal__header">
+        <h3 class="pc-modal__title" id="modal-title">Edit optimizer type</h3>
+        <button type="button" class="pc-icon-btn" id="modal-close-btn" aria-label="Close">
+          <span data-icon="close"></span>
+        </button>
+      </div>
+
+      <div class="pc-modal__body">
+        <input type="hidden" id="fw-id">
+        <div class="pc-modal__row">
+          <div class="pc-field pc-modal__row-narrow">
+            <span class="pc-field__label" id="fw-icon-label">Icon</span>
+            <div id="fw-icon-slot"></div>
+          </div>
+          <div class="pc-field pc-modal__row-wide">
+            <label class="pc-field__label" for="fw-name">Display name</label>
+            <input type="text" id="fw-name" class="pc-input" placeholder="e.g. Code reviewer">
+          </div>
+        </div>
+
+        <div class="pc-field">
+          <label class="pc-field__label" for="fw-tagline">Tagline</label>
+          <input type="text" id="fw-tagline" class="pc-input" placeholder="One line describing what this optimizer enforces">
+        </div>
+
+        <div class="pc-field">
+          <label class="pc-field__label" for="fw-system-prompt">System directive</label>
+          <textarea id="fw-system-prompt" class="pc-textarea" rows="5"
+            placeholder="Define how the AI should rewrite and structure the raw prompt…"></textarea>
+          <span class="pc-field__hint">Sent to the model as system instructions.</span>
+        </div>
+
+        <div class="pc-field">
+          <label class="pc-field__label" for="fw-template">Offline template <span class="pc-field__hint-inline">optional</span></label>
+          <textarea id="fw-template" class="pc-textarea" rows="3"
+            placeholder="Use {{prompt}}, {{persona}}, {{audience}}, {{deliverable}}"></textarea>
+          <span class="pc-field__hint">Used for instant offline transforms with no network call.</span>
+        </div>
+      </div>
+
+      <div class="pc-modal__footer">
+        <button type="button" id="cancel-framework-btn" class="pc-btn pc-btn--secondary pc-btn--md">Cancel</button>
+        <button type="button" id="save-framework-btn" class="pc-btn pc-btn--primary pc-btn--md">
+          <span data-icon="check" data-icon-size="14"></span> Save type
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Saved prompt editor ─────────────────────────────────────── -->
+  <div class="pc-backdrop" id="prompt-modal-backdrop" hidden>
+    <div class="pc-modal" role="dialog" aria-modal="true" aria-labelledby="prompt-modal-title">
+      <div class="pc-modal__header">
+        <h3 class="pc-modal__title" id="prompt-modal-title">Edit saved prompt</h3>
+        <button type="button" class="pc-icon-btn" id="prompt-modal-close-btn" aria-label="Close">
+          <span data-icon="close"></span>
+        </button>
+      </div>
+
+      <div class="pc-modal__body">
+        <input type="hidden" id="pm-id">
+
+        <div class="pc-field">
+          <label class="pc-field__label" for="pm-title">Name</label>
+          <input type="text" id="pm-title" class="pc-input" maxlength="120" placeholder="e.g. Cold outreach email" autocomplete="off">
+        </div>
+
+        <div class="pc-field">
+          <label class="pc-field__label" for="pm-labels">Labels <span class="pc-field__hint-inline">optional, comma-separated</span></label>
+          <input type="text" id="pm-labels" class="pc-input" placeholder="e.g. email, sales" autocomplete="off">
+          <div class="pc-savesheet__chips" id="pm-label-chips" role="group" aria-label="Labels already in use" hidden></div>
+        </div>
+
+        <div class="pc-field">
+          <label class="pc-field__label" for="pm-text">Prompt</label>
+          <textarea id="pm-text" class="pc-textarea" rows="9" placeholder="The prompt you want to keep…"></textarea>
+          <span class="pc-field__hint" id="pm-original-hint" hidden></span>
+        </div>
+      </div>
+
+      <div class="pc-modal__footer">
+        <button type="button" id="cancel-prompt-btn" class="pc-btn pc-btn--secondary pc-btn--md">Cancel</button>
+        <button type="button" id="save-prompt-btn" class="pc-btn pc-btn--primary pc-btn--md">
+          <span data-icon="check" data-icon-size="14"></span> Save prompt
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <div class="pc-toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script type="module" src="options.js"></script>
+</body>
+</html>

@@ -1,0 +1,10 @@
+/* PromptOptimizer Host Styles (Outer container attached to document body) */
+#promptcraft-root-host {
+  position: fixed;
+  z-index: 2147483647;
+  pointer-events: none;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+}

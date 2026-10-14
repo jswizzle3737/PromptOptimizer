@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PromptOptimizer</title>
+  <link rel="stylesheet" href="../shared/theme.css">
+  <link rel="stylesheet" href="../shared/base.css">
+  <link rel="stylesheet" href="../shared/components.css">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+
+  <div class="pc-lockup">
+    <img class="pc-lockup__logo" src="../assets/logo.png" alt="">
+    <span class="pc-lockup__word">yourlegalaid</span>
+  </div>
+
+  <header class="pc-appbar">
+    <div class="pc-brand">
+      <span class="pc-brand__mark" data-icon="wand" data-icon-size="15"></span>
+      <span class="pc-brand__name">PromptOptimizer</span>
+    </div>
+
+    <div class="pc-appbar__actions">
+      <div id="theme-toggle-slot"></div>
+      <button type="button" class="pc-icon-btn" id="library-toggle-btn"
+              aria-pressed="false" title="Saved prompts" aria-label="Saved prompts">
+        <span data-icon="bookmark"></span>
+      </button>
+      <button type="button" class="pc-icon-btn" id="history-toggle-btn"
+              aria-pressed="false" title="History" aria-label="History">
+        <span data-icon="clock"></span>
+      </button>
+      <button type="button" class="pc-icon-btn" id="options-btn"
+              title="Settings" aria-label="Settings">
+        <span data-icon="settings"></span>
+      </button>
+    </div>
+  </header>
+
+  <!-- ── First run ───────────────────────────────────────────────── -->
+  <section class="pc-onboarding" id="onboarding-view" hidden aria-labelledby="onboarding-title">
+    <h1 class="pc-onboarding__title" id="onboarding-title">Better prompts, without learning prompt engineering</h1>
+    <p class="pc-onboarding__lede">
+      PromptOptimizer rewrites a rough draft into a structured, high-performance prompt.
+      Three things worth knowing:
+    </p>
+
+    <ol class="pc-onboarding__steps">
+      <li class="pc-onboarding__step">
+        <span class="pc-onboarding__num">1</span>
+        <div>
+          <span class="pc-onboarding__step-title">Pick a framework</span>
+          <span class="pc-onboarding__step-desc">Each one shapes the prompt differently. Smart Expand is a safe default.</span>
+        </div>
+      </li>
+      <li class="pc-onboarding__step">
+        <span class="pc-onboarding__num">2</span>
+        <div>
+          <span class="pc-onboarding__step-title">Pick an engine</span>
+          <span class="pc-onboarding__step-desc" id="onboarding-engine-desc">Chrome Nano runs on your device when your browser has it. Otherwise add a key from any provider (OpenRouter has free models); you can do it right here after this screen.</span>
+        </div>
+      </li>
+      <li class="pc-onboarding__step">
+        <span class="pc-onboarding__num">3</span>
+        <div>
+          <span class="pc-onboarding__step-title">Use it inside your AI chat</span>
+          <span class="pc-onboarding__step-desc">On ChatGPT, Claude, Gemini and similar sites a floating Optimize button appears beside the chat box. Alt+O or the right-click menu opens it on any page.</span>
+        </div>
+      </li>
+    </ol>
+
+    <div class="pc-onboarding__actions">
+      <button type="button" class="pc-btn pc-btn--primary pc-btn--md" id="onboarding-start">
+        Write a prompt
+      </button>
+      <button type="button" class="pc-btn pc-btn--ghost pc-btn--sm" id="onboarding-skip">
+        Skip
+      </button>
+    </div>
+  </section>
+
+  <!-- ── Optimizer ───────────────────────────────────────────────── -->
+  <nav class="pc-frameworkbar" id="framework-bar">
+    <div class="pc-segmented" id="framework-tabs" role="tablist" aria-label="Optimizer framework"></div>
+  </nav>
+
+  <main class="pc-main" id="main-view">
+
+    <!-- Shown when no AI engine can run: Nano missing and no key saved. -->
+    <section class="pc-callout pc-callout--accent pc-setup" id="setup-card" hidden aria-labelledby="setup-title">
+      <span class="pc-callout__icon" data-icon="key" data-icon-size="15"></span>
+      <div class="pc-callout__body pc-setup__body">
+        <span class="pc-callout__title" id="setup-title">Connect an AI engine</span>
+        <span class="pc-callout__text" id="setup-text"></span>
+        <button type="button" class="pc-btn pc-btn--secondary pc-btn--sm" id="setup-download-btn" hidden>
+          <span data-icon="cpu" data-icon-size="13"></span><span>Download Chrome's on-device model</span>
+        </button>
+        <div class="pc-setup__row">
+          <div id="setup-provider-slot" class="pc-setup__provider"></div>
+          <input type="password" class="pc-input pc-input--mono" id="setup-key" placeholder="Paste API key"
+                 autocomplete="off" spellcheck="false" aria-label="API key">
+        </div>
+        <div class="pc-setup__row pc-setup__row--actions">
+          <a class="pc-setup__link" id="setup-key-link" href="#" target="_blank" rel="noopener">Get a key</a>
+          <button type="button" class="pc-btn pc-btn--ghost pc-btn--sm" id="setup-dismiss-btn">Not now</button>
+          <button type="button" class="pc-btn pc-btn--primary pc-btn--sm" id="setup-save-btn">Test and save</button>
+        </div>
+      </div>
+    </section>
+
+    <div id="library-slot"></div>
+
+    <div class="pc-field">
+      <div class="pc-field__row">
+        <label class="pc-label" for="raw-prompt">Raw prompt</label>
+        <span class="pc-meter" id="char-counter">0</span>
+      </div>
+      <textarea id="raw-prompt" class="pc-textarea" rows="4"
+                placeholder="Paste a rough idea or draft prompt…"
+                spellcheck="false"></textarea>
+    </div>
+
+    <div class="pc-assist-row">
+      <label class="pc-switch pc-context-toggle" title="Adds this tab's title and address to the request, so the rewrite can be specific to it">
+        <input type="checkbox" id="context-toggle">
+        <span class="pc-switch__track"><span class="pc-switch__thumb"></span></span>
+        <span class="pc-switch__label">Use page context</span>
+      </label>
+      <button type="button" class="pc-btn pc-btn--ghost pc-btn--sm" id="ask-first-btn"
+              title="Answer up to three questions before the rewrite">
+        <span data-icon="brain" data-icon-size="13"></span><span>Ask me first</span>
+      </button>
+    </div>
+
+    <div id="secret-slot"></div>
+    <div id="clarify-slot"></div>
+
+    <div class="pc-controls">
+      <div class="pc-controls__engine" id="engine-slot"></div>
+      <div id="variant-slot"></div>
+      <button type="button" id="optimize-btn" class="pc-btn pc-btn--primary pc-btn--md"
+              title="Optimize prompt (Ctrl+Enter)">
+        <span data-icon="wand" data-icon-size="14"></span>
+        <span>Optimize</span>
+      </button>
+    </div>
+
+    <!-- The shortcut is labelled and sits under the control it triggers.
+         It previously sat beside Copy, which it does not do. -->
+    <p class="pc-shortcut-hint">
+      <span class="pc-kbd">Ctrl</span><span class="pc-kbd">↵</span>
+      <span>to optimize</span>
+    </p>
+
+    <section class="pc-field pc-output">
+      <div class="pc-field__row">
+        <span class="pc-label">Optimized prompt</span>
+        <span class="pc-badge pc-badge--mono" id="quality-chip" hidden></span>
+        <span class="pc-badge pc-badge--accent pc-badge--mono" id="engine-status-badge" hidden></span>
+      </div>
+
+      <div class="pc-callout pc-callout--warning" id="degraded-notice" hidden role="status">
+        <span class="pc-callout__icon" data-icon="alert" data-icon-size="15"></span>
+        <div class="pc-callout__body">
+          <span class="pc-callout__title" id="degraded-title">Optimized offline</span>
+          <span class="pc-callout__text" id="degraded-reason"></span>
+          <button type="button" class="pc-btn pc-btn--ghost pc-btn--sm pc-btn--danger-text"
+                  id="degraded-settings-btn">Open settings</button>
+        </div>
+      </div>
+
+      <div class="pc-output__box">
+        <div class="pc-empty" id="result-placeholder">
+          <span class="pc-empty__icon" data-icon="wand" data-icon-size="16"></span>
+          <span class="pc-empty__title">No output yet</span>
+          <span class="pc-empty__desc">Write a prompt above, then press Optimize.</span>
+        </div>
+        <pre class="pc-output__text" id="result-text" hidden></pre>
+      </div>
+
+      <div class="pc-variants" id="variant-chips" hidden></div>
+      <div id="result-actions-slot"></div>
+      <div class="pc-chips" id="tech-chips" hidden></div>
+    </section>
+
+    <div id="save-slot"></div>
+
+    <footer class="pc-statusbar">
+      <span class="pc-statusbar__state">
+        <span class="pc-status-dot" id="status-dot"></span>
+        <span id="status-message">Ready</span>
+      </span>
+      <span class="pc-statusbar__right">
+        <button type="button" id="save-btn" class="pc-btn pc-btn--secondary pc-btn--sm">
+          <span data-icon="bookmark" data-icon-size="13"></span>
+          <span>Save</span>
+        </button>
+        <button type="button" id="copy-btn" class="pc-btn pc-btn--secondary pc-btn--sm">
+          <span data-icon="copy" data-icon-size="13"></span>
+          <span>Copy</span>
+        </button>
+      </span>
+    </footer>
+
+    <!-- Per-site opt-in. Hidden on pages the extension cannot run on. -->
+    <div class="pc-site" id="site-row" hidden>
+      <span class="pc-site__text" id="site-text"></span>
+      <button type="button" class="pc-btn pc-btn--ghost pc-btn--sm" id="site-toggle-btn" hidden></button>
+    </div>
+  </main>
+
+  <!-- ── History ─────────────────────────────────────────────────── -->
+  <section class="pc-history" id="history-view" hidden>
+    <div class="pc-field__row pc-history__head">
+      <span class="pc-label">Recent optimizations</span>
+      <button type="button" id="clear-history-btn" class="pc-btn pc-btn--ghost pc-btn--sm pc-btn--danger-text">
+        Clear all
+      </button>
+    </div>
+    <div class="pc-history__list" id="history-list"></div>
+  </section>
+
+  <div class="pc-toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

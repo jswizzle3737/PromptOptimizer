@@ -1,0 +1,95 @@
+# PromptOptimizer — Project Rules
+
+## Design Context
+
+Established 2026-09-30. Full version lives in `.impeccable.md`; this is the operative summary.
+
+### Users
+
+Two overlapping groups, both already fluent with conversational AI:
+
+- **The improver.** Uses ChatGPT / Claude / Gemini most days. Knows their prompts are
+  underperforming but does not want to learn prompt-engineering frameworks. Wants a one-click
+  upgrade without reading documentation.
+- **The power user.** Wants a fast in-page accelerator: keyboard-first, no modal friction, and
+  visibility into the system prompt doing the work.
+
+Context of use: mid-task, inside someone else's web app, often with a draft already typed. The
+tool is an interruption to real work and must justify the interruption instantly.
+
+### Brand Personality
+
+**Precise. Unobtrusive. Professional.** The voice of a good instrument, not a good salesman. It
+states what it did and gets out of the way. No exclamation marks, no celebrating routine actions.
+When something degrades, it says so plainly instead of absorbing the failure.
+Emotional goal: **confidence** — the user should trust that the output is what it claims to be.
+
+### Aesthetic Direction
+
+**Neutral-professional.** Restrained, high-legibility, deliberately quiet. The interface lives
+inside a host page it does not own and must never fight it for attention.
+Ten designs are on offer (added 2026-10-02 at the owner's request, superseding the earlier
+dark/light pair). Ink is the default and Paper its light counterpart; the other eight are
+Terminal, Ember, Harbor, Contrast, Manuscript, Sand, Glacier and Meadow. Each must be a complete
+design: its own palette AND a type, corner or weight decision, so the list expresses range rather
+than recolouring. `unit/themes.test.mjs` enforces that, and `node check_contrast.js` holds all ten
+to WCAG AA.
+
+#### Anti-references — must not look like this
+
+- Inter (or Roboto / Arial / Open Sans) as the primary typeface
+- Indigo / violet accents (`#6366F1` and neighbours) on near-black navy surfaces
+- Colored glow shadows on interactive elements
+- Gradient text
+- Emoji used as iconography
+- Glassmorphism / backdrop blur as decoration
+- Every setting wrapped in an identical rounded card
+- Elastic or overshoot easing
+- A long theme list that is only recolours (every design must differ in type, shape or weight too)
+
+### Design Principles
+
+1. **The framework is the product.** Framework selection gets the prominent, always-reachable
+   control. Engine, theme, and history are secondary and belong in Options.
+2. **Never report a degraded result as a success.** If the requested engine failed, say so, name
+   the reason, and offer the fix. Silent fallback is a trust bug, not graceful degradation.
+3. **One name per action.** The product is "PromptOptimizer" — the verb is
+   *optimize*, everywhere, in every surface.
+4. **Every option must be visibly reachable.** No control may hide choices behind an affordance
+   the user cannot see.
+5. **Tokens or nothing.** All color, space, type, and motion resolve through `shared/theme.css`.
+   No surface hardcodes a value.
+6. **Explain in place.** Help belongs next to the thing it explains, not on a settings page.
+
+---
+
+## Technical conventions
+
+- **No build step.** Plain ES modules, no bundler, no `package.json`. `manifest.json` is the only
+  project definition file. Do not introduce a toolchain.
+- **`chrome.storage.local` outlives the code that wrote it.** Editing a `DEFAULT_*` constant does
+  **not** reach an existing install — `getSettings()` and `getFrameworks()` return the stored copy
+  in preference to the defaults. Any shape change needs a migration branch plus a `SCHEMA_VERSION`
+  bump in `shared/storage.js`.
+- **Three UI surfaces share one design system:** `popup/`, `options/`, and `content/content.js`
+  (Shadow DOM). Style through `shared/theme.css` + `base.css` + `components.css`. The in-page
+  surface cannot load remote fonts — page CSP blocks them — so `--font-sans` stays a system stack.
+- **`shared/theme-picker.js` is the single source of truth for theme metadata.** Do not re-list
+  themes elsewhere.
+- **Icons come from `shared/icons.js`.** Never emoji, never inline path data in a template.
+- **Contrast is verified, not assumed.** Run `node check_contrast.js` after touching any color
+  token; it asserts WCAG AA on every pair that carries meaning.
+- **`shared/engines.js` is the single source of truth for the engine list**, and
+  `PROVIDER_DEFAULTS` in `shared/storage.js` for provider model ids. Do not re-list either.
+- **No credential ever ships in source.** `DEFAULT_SETTINGS` carries empty keys. A retired key is
+  recognised by hash in `RETIRED_OPENROUTER_KEY_HASHES`, never by value.
+- **The content script runs only on the manifest's listed AI sites, plus origins the user opts in.**
+  Anywhere else it arrives via `activeTab` injection. Never widen `content_scripts.matches`.
+- **Run `node --no-warnings --test "unit/*.test.mjs"`** after touching the engine, storage,
+  frameworks, or service worker. Write the failing test first.
+- **Adding a design:** add its colour block to `shared/theme.css`, its entry to `THEMES` in
+  `shared/theme-picker.js`, and run `node check_contrast.js` plus the unit tests. Never reuse a
+  retired id (`LEGACY_THEME_IDS`).
+- **Saved prompts live behind `shared/library.js`.** Popup and Options call it directly; the in-page
+  modal goes through the service worker (`SAVE_PROMPT`, `LIBRARY_LABELS`). Do not write the
+  `promptcraft_library` key from anywhere else.

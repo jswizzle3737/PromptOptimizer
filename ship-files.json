@@ -1,0 +1,4 @@
+{
+  "//": "Everything the extension needs at runtime, and nothing else. Read by package.mjs (the store zip) and test_extension.js (the copy under test), so the two cannot drift.",
+  "files": ["manifest.json", "background", "content", "offscreen", "popup", "options", "shared", "icons", "assets"]
+}
