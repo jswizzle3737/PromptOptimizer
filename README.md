@@ -1,5 +1,7 @@
 # PromptOptimizer (Manifest V3)
 
+> Your own API or subscription, your own instructions, that turn lazy prompts into structured ideas, or crazy ideas into distilled actionable plans. Highly customizable.
+
 PromptOptimizer is a Chrome extension that rewrites rough prompts into structured, high-performance ones for **ChatGPT**, **Claude**, **Google Gemini**, **Perplexity**, **DeepSeek**, **Mistral**, **Grok**, **Microsoft Copilot**, **Poe**, and, on request, any other site.
 
 ---
