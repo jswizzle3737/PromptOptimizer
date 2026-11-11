@@ -1,0 +1,101 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Unit tests and package
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: System tools
+        run: |
+          missing=()
+          command -v zip >/dev/null || missing+=(zip)
+          command -v unzip >/dev/null || missing+=(unzip)
+          if ! ldconfig -p | grep -q 'libatomic\.so\.1'; then
+            missing+=(libatomic1)
+          fi
+          if [ "${#missing[@]}" -gt 0 ]; then
+            sudo apt-get update
+            sudo apt-get install -y "${missing[@]}"
+          fi
+
+      - name: Set up Node.js 26
+        uses: actions/setup-node@v7
+        with:
+          # Active LTS (Lithium). The action reuses a cached 26.x toolchain.
+          # This repo has no package.json, so npm dependency caching does not apply.
+          node-version: "26"
+
+      - name: Unit tests
+        run: node --no-warnings --test "unit/*.test.mjs"
+
+      - name: Package the extension
+        run: node package.mjs
+
+      - name: Validate manifest and zip
+        run: |
+          node --input-type=module <<'EOF'
+          import { readFileSync } from 'node:fs';
+          import { spawnSync } from 'node:child_process';
+
+          const raw = readFileSync('manifest.json', 'utf8');
+          let manifest;
+          try {
+            manifest = JSON.parse(raw);
+          } catch (err) {
+            console.error(`manifest.json is not valid JSON: ${err.message}`);
+            process.exit(1);
+          }
+
+          function fail(message) {
+            console.error(message);
+            process.exit(1);
+          }
+
+          if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) {
+            fail('manifest.json must be a JSON object');
+          }
+          if (manifest.manifest_version !== 3) {
+            fail(`manifest_version must be 3, got ${manifest.manifest_version}`);
+          }
+          if (typeof manifest.name !== 'string' || manifest.name.trim() === '') {
+            fail('manifest name must be a non-empty string');
+          }
+          if (typeof manifest.version !== 'string' || !/^\d+\.\d+\.\d+$/.test(manifest.version)) {
+            fail(`manifest version must be MAJOR.MINOR.PATCH, got ${manifest.version}`);
+          }
+
+          const zip = `dist/promptoptimizer-${manifest.version}.zip`;
+          const tested = spawnSync('unzip', ['-t', zip], { encoding: 'utf8' });
+          if (tested.status !== 0) {
+            fail(tested.stderr || tested.stdout || `unzip -t failed for ${zip}`);
+          }
+          const packed = spawnSync('unzip', ['-p', zip, 'manifest.json'], { encoding: 'utf8' });
+          if (packed.status !== 0) {
+            fail(`${zip} does not contain manifest.json`);
+          }
+          let packedManifest;
+          try {
+            packedManifest = JSON.parse(packed.stdout);
+          } catch (err) {
+            fail(`packaged manifest.json is not valid JSON: ${err.message}`);
+          }
+          if (
+            packedManifest.manifest_version !== manifest.manifest_version ||
+            packedManifest.name !== manifest.name ||
+            packedManifest.version !== manifest.version
+          ) {
+            fail('packaged manifest.json does not match the source manifest');
+          }
+          console.log(`manifest.json valid (MV3 ${manifest.name} ${manifest.version}); ${zip} ok`);
+          EOF
