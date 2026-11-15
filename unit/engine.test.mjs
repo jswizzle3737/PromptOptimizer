@@ -215,6 +215,44 @@ test('nano: no LanguageModel at all degrades as unsupported', async () => {
   assert.match(r.degradedReason, /not (available|supported)|unsupported/i);
 });
 
+test('nano: disabled execution flag calls availability() once and surfaces flag instructions while TypeError still falls back', async () => {
+  installChromeStub(settings({ preferredEngine: 'nano' }));
+  let calls = 0;
+  globalThis.LanguageModel = {
+    availability: async opts => {
+      calls++;
+      assert.deepEqual(opts?.expectedInputs, [{ type: 'text', languages: ['en'] }]);
+      assert.deepEqual(opts?.expectedOutputs, [{ type: 'text', languages: ['en'] }]);
+      const err = new Error('The feature flag gating model execution was disabled.');
+      err.name = 'NotSupportedError';
+      throw err;
+    }
+  };
+  const status = await checkBuiltInPromptApiStatus();
+  assert.equal(calls, 1, 'NotSupportedError must not trigger a second bare availability() call');
+  assert.equal(status.available, false);
+  assert.equal(status.status, 'error');
+  assert.match(status.error, /feature flag gating model execution/i);
+
+  const r = await optimizePrompt(RAW);
+  assert.equal(r.degraded, true);
+  assert.match(r.degradedReason, /model execution flag is disabled/i);
+  assert.match(r.degradedReason, /#prompt-api-for-gemini-nano/);
+  assert.match(r.degradedReason, /#optimization-guide-on-device-model/);
+
+  let fallbackCalls = 0;
+  globalThis.LanguageModel = {
+    availability: async opts => {
+      fallbackCalls++;
+      if (opts !== undefined) throw new TypeError('Unsupported options');
+      return 'available';
+    }
+  };
+  const legacyStatus = await checkBuiltInPromptApiStatus();
+  assert.equal(fallbackCalls, 2);
+  assert.equal(legacyStatus.available, true);
+});
+
 /* ---------------------------------------------------- connection testing */
 
 test('verifyProvider resolves on success and surfaces the provider message on failure', async () => {

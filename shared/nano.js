@@ -7,7 +7,11 @@
  * This module is the one implementation both sides share.
  */
 
-const NANO_LANGUAGES = [{ type: 'text', languages: ['en'] }];
+export const NANO_LANGUAGES = [{ type: 'text', languages: ['en'] }];
+export const NANO_SESSION_OPTIONS = {
+  expectedInputs: NANO_LANGUAGES,
+  expectedOutputs: NANO_LANGUAGES
+};
 
 export const NANO_STATE_ERRORS = {
   unsupported: 'Chrome built-in Prompt API is not supported in this browser.',
@@ -28,23 +32,28 @@ export async function checkLocalNanoStatus() {
 
     let availability;
     try {
-      availability = await LanguageModel.availability({
-        expectedInputs: NANO_LANGUAGES,
-        expectedOutputs: NANO_LANGUAGES
-      });
-    } catch {
+      availability = await LanguageModel.availability(NANO_SESSION_OPTIONS);
+    } catch (err) {
+      // Only fall back for older signatures that reject options with TypeError;
+      // NotSupportedError (e.g. model execution flag disabled) must not trigger a second native call.
+      if (err?.name !== 'TypeError') throw err;
       availability = await LanguageModel.availability();
     }
     return { available: availability === 'available', status: availability };
   } catch (err) {
-    return { available: false, status: 'error', error: err.message };
+    return { available: false, status: 'error', error: err?.message || String(err) };
   }
 }
 
 export function nanoStatusError(status) {
-  return status.status === 'error'
-    ? `Could not probe the Chrome Prompt API: ${status.error}`
-    : (NANO_STATE_ERRORS[status.status] || `Chrome built-in Prompt API reported "${status.status}".`);
+  if (status.status === 'error') {
+    const msg = String(status.error || '').trim();
+    if (/feature flag|gating model execution/i.test(msg)) {
+      return `Chrome Nano model execution flag is disabled (${msg}). Enable chrome://flags/#prompt-api-for-gemini-nano and chrome://flags/#optimization-guide-on-device-model, or choose another engine in Settings.`;
+    }
+    return `Could not probe the Chrome Prompt API: ${msg}`;
+  }
+  return NANO_STATE_ERRORS[status.status] || `Chrome built-in Prompt API reported "${status.status}".`;
 }
 
 const NANO_QUOTA_ERROR =
@@ -108,8 +117,7 @@ export async function runLocalNano({ systemPrompt, userMessage, timeoutMs, signa
   try {
     session = await globalThis.LanguageModel.create({
       initialPrompts: [{ role: 'system', content: systemPrompt }],
-      expectedInputs: NANO_LANGUAGES,
-      expectedOutputs: NANO_LANGUAGES,
+      ...NANO_SESSION_OPTIONS,
       signal: combined
     });
 
@@ -137,6 +145,9 @@ export async function runLocalNano({ systemPrompt, userMessage, timeoutMs, signa
     }
     if (err?.name === 'QuotaExceededError') {
       throw new Error(NANO_QUOTA_ERROR);
+    }
+    if (/feature flag|gating model execution/i.test(err?.message || '')) {
+      throw new Error(nanoStatusError({ status: 'error', error: err.message }));
     }
     throw err;
   } finally {

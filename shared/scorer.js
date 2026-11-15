@@ -23,6 +23,11 @@
 
 import { FRAMEWORK_TECHNIQUES } from './target-profiles.js';
 
+const JUDGE_SESSION_OPTIONS = {
+  expectedInputs: [{ type: 'text', languages: ['en'] }],
+  expectedOutputs: [{ type: 'text', languages: ['en'] }]
+};
+
 /* ------------------------------------------------------------------ */
 /* Rubric                                                              */
 /* ------------------------------------------------------------------ */
@@ -163,14 +168,20 @@ export async function judgeWithNano(rawPrompt, optimized, timeoutMs = 15000) {
 
     let availability;
     try {
-      availability = await LanguageModel.availability();
-    } catch {
-      return null;
+      availability = await LanguageModel.availability(JUDGE_SESSION_OPTIONS);
+    } catch (err) {
+      if (err?.name !== 'TypeError') return null;
+      try {
+        availability = await LanguageModel.availability();
+      } catch {
+        return null;
+      }
     }
     if (availability !== 'available') return null;
 
     session = await LanguageModel.create({
-      initialPrompts: [{ role: 'system', content: JUDGE_SYSTEM_PROMPT }]
+      initialPrompts: [{ role: 'system', content: JUDGE_SYSTEM_PROMPT }],
+      ...JUDGE_SESSION_OPTIONS
     });
 
     const reply = await session.prompt(

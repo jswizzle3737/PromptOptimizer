@@ -132,13 +132,17 @@
 
           <hr class="pc-divider">
 
-          <div class="pc-callout pc-callout--warning" id="nano-status-banner">
+          <div class="pc-callout pc-callout--accent" id="nano-status-banner">
             <span class="pc-callout__icon" data-icon="cpu" data-icon-size="15"></span>
             <span class="pc-nano-body">
               <span class="pc-callout__title">Chrome built-in Prompt API</span>
-              <span id="nano-status-text">Checking status…</span>
-              <div class="pc-nano-actions" id="nano-actions" hidden>
-                <button type="button" class="pc-btn pc-btn--secondary pc-btn--sm" id="nano-download-btn">
+              <span id="nano-status-text">Not checked yet.</span>
+              <div class="pc-nano-actions" id="nano-actions">
+                <button type="button" class="pc-btn pc-btn--secondary pc-btn--sm" id="nano-check-btn">
+                  <span data-icon="refresh" data-icon-size="13"></span>
+                  <span>Check status</span>
+                </button>
+                <button type="button" class="pc-btn pc-btn--secondary pc-btn--sm" id="nano-download-btn" hidden>
                   <span data-icon="cpu" data-icon-size="13"></span>
                   <span>Download on-device model</span>
                 </button>

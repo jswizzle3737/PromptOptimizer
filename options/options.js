@@ -4,6 +4,7 @@ import {
   getHistory, removeHistoryEntry, clearHistory
 } from '../shared/storage.js';
 import { checkBuiltInPromptApiStatus, verifyProvider } from '../shared/optimizer-engine.js';
+import { NANO_SESSION_OPTIONS } from '../shared/nano.js';
 import { engineOptions, DEFAULT_ENGINE, ENGINE_LABELS } from '../shared/engines.js';
 import {
   LIBRARY_KEY, LIMITS, getLibrary, saveToLibrary, updateLibraryEntry, deleteLibraryEntry,
@@ -59,6 +60,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     toast: $('toast'),
     nanoText: $('nano-status-text'),
     nanoActions: $('nano-actions'),
+    nanoCheckBtn: $('nano-check-btn'),
     nanoDownloadBtn: $('nano-download-btn'),
     nanoHelp: $('nano-instructions'),
     nanoBanner: $('nano-status-banner'),
@@ -1135,41 +1137,86 @@ document.addEventListener('DOMContentLoaded', async () => {
   await Promise.all([refreshLibrary(), refreshHistory()]);
 
   /* ------------------------------------------------------- Nano status */
+  function setNanoTone(tone) {
+    el.nanoBanner.classList.remove('pc-callout--accent', 'pc-callout--warning', 'pc-callout--success', 'pc-callout--danger');
+    if (tone) el.nanoBanner.classList.add(`pc-callout--${tone}`);
+  }
+
+  function initNanoBanner() {
+    if (typeof globalThis.LanguageModel === 'undefined') {
+      setNanoTone('warning');
+      el.nanoText.textContent = 'Unavailable (not exposed in this browser). Enable the Chrome flags below if using Chrome, or configure another engine above.';
+      el.nanoActions.hidden = false;
+      el.nanoDownloadBtn.hidden = true;
+      el.nanoHelp.hidden = false;
+      return;
+    }
+    setNanoTone('accent');
+    el.nanoText.textContent = 'Built-in Prompt API detected in this browser. Click Check status to verify model availability or start a download.';
+    el.nanoActions.hidden = false;
+    el.nanoDownloadBtn.hidden = true;
+    el.nanoHelp.hidden = true;
+  }
+
   async function refreshNanoStatus() {
+    el.nanoCheckBtn.disabled = true;
+    el.nanoCheckBtn.innerHTML = `<span class="pc-spinner"></span><span>Checking…</span>`;
     try {
       const nano = await checkBuiltInPromptApiStatus();
       if (nano.available) {
-        el.nanoBanner.classList.remove('pc-callout--warning');
-        el.nanoBanner.classList.add('pc-callout--success');
+        setNanoTone('success');
         el.nanoText.textContent = 'Ready — on-device Gemini Nano is available in this browser.';
-        el.nanoActions.hidden = true;
+        el.nanoActions.hidden = false;
+        el.nanoDownloadBtn.hidden = true;
         el.nanoHelp.hidden = true;
       } else if (nano.status === 'downloadable') {
-        el.nanoBanner.classList.remove('pc-callout--success');
-        el.nanoBanner.classList.add('pc-callout--warning');
+        setNanoTone('warning');
         el.nanoText.textContent = 'The on-device model is ready to download. Start the download below, or check the flags if it fails.';
         el.nanoActions.hidden = false;
+        el.nanoDownloadBtn.hidden = false;
         el.nanoHelp.hidden = false;
       } else if (nano.status === 'downloading') {
-        el.nanoBanner.classList.remove('pc-callout--success');
-        el.nanoBanner.classList.add('pc-callout--warning');
-        el.nanoText.textContent = 'The on-device model is currently downloading. Check chrome://components, then reload this page.';
-        el.nanoActions.hidden = true;
+        setNanoTone('warning');
+        el.nanoText.textContent = 'The on-device model is currently downloading. Check chrome://components, then check status again.';
+        el.nanoActions.hidden = false;
+        el.nanoDownloadBtn.hidden = true;
+        el.nanoHelp.hidden = false;
+      } else if (nano.status === 'error') {
+        setNanoTone('warning');
+        const detail = String(nano.error || '').trim();
+        if (/feature flag|gating model execution/i.test(detail)) {
+          el.nanoText.textContent =
+            `Disabled by browser flag (${detail}). Enable both flags below in Chrome and relaunch, or choose OmniRoute / an API key above.`;
+        } else {
+          el.nanoText.textContent = detail
+            ? `Unavailable (${detail}). Enable the flags below or choose another engine.`
+            : 'Unavailable (error probing the Prompt API). Enable the flags below or choose another engine.';
+        }
+        el.nanoActions.hidden = false;
+        el.nanoDownloadBtn.hidden = true;
         el.nanoHelp.hidden = false;
       } else {
-        el.nanoBanner.classList.remove('pc-callout--success');
-        el.nanoBanner.classList.add('pc-callout--warning');
-        el.nanoText.textContent = `Unavailable (${nano.status || 'not detected'}). Enable the flags below to use it.`;
-        el.nanoActions.hidden = true;
+        setNanoTone('warning');
+        const reason = nano.status === 'unsupported' ? 'not exposed in this browser' : (nano.status || 'not detected');
+        el.nanoText.textContent = `Unavailable (${reason}). Enable the flags below to use it, or choose another engine.`;
+        el.nanoActions.hidden = false;
+        el.nanoDownloadBtn.hidden = true;
         el.nanoHelp.hidden = false;
       }
     } catch (err) {
-      el.nanoActions.hidden = true;
+      setNanoTone('warning');
+      el.nanoActions.hidden = false;
+      el.nanoDownloadBtn.hidden = true;
       el.nanoText.textContent = `Could not probe the Prompt API: ${err.message}`;
       el.nanoHelp.hidden = false;
+    } finally {
+      el.nanoCheckBtn.disabled = false;
+      el.nanoCheckBtn.innerHTML = `${icon('refresh', { size: 13 })}<span>Check status</span>`;
     }
   }
-  await refreshNanoStatus();
+  initNanoBanner();
+
+  el.nanoCheckBtn.addEventListener('click', refreshNanoStatus);
 
   el.nanoDownloadBtn.addEventListener('click', async () => {
     const LM = globalThis.LanguageModel;
@@ -1178,9 +1225,11 @@ document.addEventListener('DOMContentLoaded', async () => {
       return;
     }
     el.nanoDownloadBtn.disabled = true;
+    el.nanoCheckBtn.disabled = true;
     el.nanoDownloadBtn.innerHTML = `<span class="pc-spinner"></span><span>Starting download…</span>`;
     try {
       const session = await LM.create({
+        ...NANO_SESSION_OPTIONS,
         monitor(m) {
           m.addEventListener('downloadprogress', ev => {
             const loaded = Number(ev?.loaded ?? 0);
@@ -1195,10 +1244,22 @@ document.addEventListener('DOMContentLoaded', async () => {
       await refreshNanoStatus();
       toast('On-device Gemini Nano is ready');
     } catch (err) {
-      toast(`Download failed: ${err.message}`, 'danger');
-      await refreshNanoStatus();
+      const msg = err?.message || String(err);
+      const isFlagDisabled = /feature flag|gating model execution/i.test(msg);
+      toast(
+        isFlagDisabled ? 'Browser model execution flag is disabled — see instructions' : `Download failed: ${msg}`,
+        'danger'
+      );
+      setNanoTone('warning');
+      el.nanoActions.hidden = false;
+      el.nanoDownloadBtn.hidden = true;
+      el.nanoText.textContent = isFlagDisabled
+        ? `Disabled by browser flag (${msg}). Enable both flags below and relaunch Chrome, or use another engine.`
+        : `Download failed: ${msg}`;
+      el.nanoHelp.hidden = false;
     } finally {
       el.nanoDownloadBtn.disabled = false;
+      el.nanoCheckBtn.disabled = false;
       el.nanoDownloadBtn.innerHTML = `${icon('cpu', { size: 13 })}<span>Download on-device model</span>`;
     }
   });

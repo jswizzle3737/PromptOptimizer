@@ -16,6 +16,7 @@ import {
   createUndoStack, bindEditableResult
 } from '../shared/assist.js';
 import { checkBuiltInPromptApiStatus, verifyProvider } from '../shared/optimizer-engine.js';
+import { NANO_SESSION_OPTIONS } from '../shared/nano.js';
 import { scorePrompt, contractTraitIds } from '../shared/scorer.js';
 
 document.addEventListener('DOMContentLoaded', async () => {
@@ -70,6 +71,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     resultActionsSlot: document.getElementById('result-actions-slot'),
     setupCard: document.getElementById('setup-card'),
     setupText: document.getElementById('setup-text'),
+    setupCheckBtn: document.getElementById('setup-check-btn'),
     setupDownloadBtn: document.getElementById('setup-download-btn'),
     setupProviderSlot: document.getElementById('setup-provider-slot'),
     setupKey: document.getElementById('setup-key'),
@@ -718,21 +720,27 @@ document.addEventListener('DOMContentLoaded', async () => {
       setStatus('Offline fallback', 'warning');
       toast('Fell back to the offline template', 'danger');
       refreshSetupCard();
-    } else if (data.fallbackReason) {
-      /* Another configured provider answered for the chosen one. */
-      const requested = ENGINE_LABELS[data.requestedEngine] || data.requestedEngine;
-      const used = ENGINE_LABELS[data.engine] || data.engine;
-      el.engineBadge.title = `${requested} failed: ${data.fallbackReason}`;
-      setStatus(`Used ${used}`, 'warning');
-      toast(`${requested} unavailable, used ${used}`, 'neutral');
-    } else if (data.truncated) {
-      el.engineBadge.title = '';
-      setStatus('Cut off', 'warning');
-      toast('The output was cut off. Press Continue to finish it.', 'neutral');
     } else {
-      el.engineBadge.title = '';
-      setStatus('Done', 'success');
-      toast(data.refinement ? 'Prompt refined' : 'Prompt optimized', 'success');
+      if (data.engine === 'nano') {
+        nanoStatus = { available: true, status: 'available' };
+        el.setupCard.hidden = true;
+      }
+      if (data.fallbackReason) {
+        /* Another configured provider answered for the chosen one. */
+        const requested = ENGINE_LABELS[data.requestedEngine] || data.requestedEngine;
+        const used = ENGINE_LABELS[data.engine] || data.engine;
+        el.engineBadge.title = `${requested} failed: ${data.fallbackReason}`;
+        setStatus(`Used ${used}`, 'warning');
+        toast(`${requested} unavailable, used ${used}`, 'neutral');
+      } else if (data.truncated) {
+        el.engineBadge.title = '';
+        setStatus('Cut off', 'warning');
+        toast('The output was cut off. Press Continue to finish it.', 'neutral');
+      } else {
+        el.engineBadge.title = '';
+        setStatus('Done', 'success');
+        toast(data.refinement ? 'Prompt refined' : 'Prompt optimized', 'success');
+      }
     }
     editableCtrl.setEditable(Boolean(state.latest && !state.busy));
     updateClearDraftVisibility();
@@ -1006,21 +1014,66 @@ document.addEventListener('DOMContentLoaded', async () => {
   el.setupProviderSlot.appendChild(setupProvider.element);
 
   let nanoStatus = null;
-  async function refreshSetupCard() {
+  async function refreshSetupCard({ probe = false } = {}) {
     const s = await getSettings();
     const hasKey = Object.keys(KEY_LINKS).some(id => String(s[`${id}ApiKey`] || '').trim());
     const omniReady = Boolean(s.omnirouteEnabled || String(s.omnirouteApiKey || '').trim());
-    nanoStatus ??= await checkBuiltInPromptApiStatus();
-    const engineReady = s.preferredEngine === 'offline' || hasKey || omniReady ||
-      (s.preferredEngine === 'nano' && nanoStatus.available);
-    const show = !engineReady && !s.setupDismissed;
-    el.setupCard.hidden = !show;
-    if (!show) return;
+    if (s.preferredEngine === 'offline' || hasKey || omniReady || s.setupDismissed) {
+      el.setupCard.hidden = true;
+      return;
+    }
+
+    if (typeof globalThis.LanguageModel === 'undefined') {
+      nanoStatus = { available: false, status: 'unsupported' };
+    } else if (probe) {
+      nanoStatus = await checkBuiltInPromptApiStatus();
+    }
+
+    if (nanoStatus?.available) {
+      el.setupCard.hidden = true;
+      await saveSettings({ setupDismissed: true });
+      return;
+    }
+
+    el.setupCard.hidden = false;
+    if (!nanoStatus) {
+      el.setupCheckBtn.hidden = false;
+      el.setupDownloadBtn.hidden = true;
+      el.setupText.textContent =
+        'Check whether Chrome\'s on-device model is ready, add an API key (OpenRouter has free models), or configure OmniRoute in Options.';
+      return;
+    }
+
+    el.setupCheckBtn.hidden = true;
     el.setupDownloadBtn.hidden = nanoStatus.status !== 'downloadable';
-    el.setupText.textContent = nanoStatus.status === 'downloadable'
-      ? 'Chrome can run a private on-device model, but it is not downloaded yet. Download it once, add an API key, or configure OmniRoute in Options.'
-      : 'Chrome\'s on-device model is not available in this browser, so rewrites use a basic template. Add a key from any provider (OpenRouter has free models) or configure OmniRoute in Options.';
+    if (nanoStatus.status === 'downloadable') {
+      el.setupText.textContent =
+        'Chrome can run a private on-device model, but it is not downloaded yet. Download it once, add an API key, or configure OmniRoute in Options.';
+    } else if (nanoStatus.status === 'downloading') {
+      el.setupText.textContent =
+        'Chrome\'s on-device model is currently downloading. Check chrome://components, add an API key, or configure OmniRoute in Options.';
+    } else if (nanoStatus.status === 'error' && /feature flag|gating model execution/i.test(nanoStatus.error || '')) {
+      el.setupText.textContent =
+        'Chrome\'s on-device model execution flag is disabled. Enable the flags in Options, add an API key below, or configure OmniRoute.';
+    } else {
+      el.setupText.textContent =
+        'Chrome\'s on-device model is not available in this browser, so rewrites use a basic template. Add a key from any provider (OpenRouter has free models) or configure OmniRoute in Options.';
+    }
   }
+
+  el.setupCheckBtn.addEventListener('click', async () => {
+    el.setupCheckBtn.disabled = true;
+    el.setupCheckBtn.lastElementChild.textContent = 'Checking…';
+    try {
+      await refreshSetupCard({ probe: true });
+      if (nanoStatus?.available) {
+        toast('On-device Gemini Nano is ready', 'success');
+      }
+    } finally {
+      el.setupCheckBtn.disabled = false;
+      el.setupCheckBtn.lastElementChild.textContent = 'Check Chrome Nano';
+    }
+  });
 
   el.setupSaveBtn.addEventListener('click', async () => {
     const provider = setupProvider.getValue();
@@ -1056,31 +1109,47 @@ document.addEventListener('DOMContentLoaded', async () => {
   /* Downloading Nano needs a user gesture: this click. */
   el.setupDownloadBtn.addEventListener('click', async () => {
     const LM = globalThis.LanguageModel;
-    if (!LM) return;
+    if (!LM || typeof LM.create !== 'function') return;
     el.setupDownloadBtn.disabled = true;
     setStatus('Downloading on-device model…', 'neutral');
     try {
       const session = await LM.create({
+        ...NANO_SESSION_OPTIONS,
         monitor(m) {
-          m.addEventListener('downloadprogress', e => {
-            const pct = Math.round((e.loaded || 0) * 100);
-            el.setupDownloadBtn.lastElementChild.textContent = `Downloading… ${pct}%`;
-            setStatus(`Downloading on-device model… ${pct}%`, 'neutral');
+          m.addEventListener('downloadprogress', ev => {
+            const loaded = Number(ev?.loaded ?? 0);
+            const total = Number(ev?.total ?? 0);
+            const pct = total > 0 ? Math.round((loaded / total) * 100) : Math.round(loaded * 100);
+            const clamped = Math.max(0, Math.min(100, pct));
+            el.setupDownloadBtn.lastElementChild.textContent = `Downloading… ${clamped}%`;
+            setStatus(`Downloading on-device model… ${clamped}%`, 'neutral');
           });
         }
       });
-      session.destroy?.();
-      nanoStatus = null;
-      await saveSettings({ preferredEngine: 'nano' });
+      try { session?.destroy?.(); } catch {}
+      nanoStatus = { available: true, status: 'available' };
+      await saveSettings({ preferredEngine: 'nano', setupDismissed: true });
       state.engine = 'nano';
       engineSelect.setValue('nano', { silent: true });
       setStatus('On-device model ready', 'success');
       toast('On-device model ready', 'success');
       await refreshSetupCard();
     } catch (err) {
+      const msg = err?.message || String(err);
       setStatus('Download failed', 'danger');
-      toast(`Download failed: ${err.message}`, 'danger');
+      toast(
+        /feature flag|gating model execution/i.test(msg)
+          ? 'Browser model execution flag is disabled — check Settings'
+          : `Download failed: ${msg}`,
+        'danger'
+      );
+      if (/feature flag|gating model execution/i.test(msg)) {
+        nanoStatus = { available: false, status: 'error', error: msg };
+        await refreshSetupCard();
+      }
+    } finally {
       el.setupDownloadBtn.disabled = false;
+      el.setupDownloadBtn.lastElementChild.textContent = 'Download Chrome\'s on-device model';
     }
   });
 

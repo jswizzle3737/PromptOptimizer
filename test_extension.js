@@ -279,17 +279,24 @@ async function runTests() {
     const popupTab = await popupTabRes.json();
 
     const popupClient = await createCdpClient(popupTab.webSocketDebuggerUrl);
-    await popupClient.send('Runtime.enable');
-    await popupClient.send('Page.enable');
-    await popupClient.send('Console.enable');
-
+    const popupLoadErrors = [];
     popupClient.onEvent((evt) => {
       if (evt.method === 'Runtime.exceptionThrown') {
         console.error('✗ Popup Exception:', evt.params.exceptionDetails);
+        popupLoadErrors.push(`Exception: ${evt.params.exceptionDetails?.text || JSON.stringify(evt.params.exceptionDetails)}`);
+      } else if (evt.method === 'Log.entryAdded' && (evt.params.entry?.level === 'error' || evt.params.entry?.level === 'warning')) {
+        popupLoadErrors.push(`Log[${evt.params.entry.level}]: ${evt.params.entry.text}`);
       } else if (evt.method === 'Console.messageAdded') {
         console.log('  [Popup Console]:', evt.params.message.text);
+        if (evt.params.message?.level === 'error' || evt.params.message?.level === 'warning') {
+          popupLoadErrors.push(`Console[${evt.params.message.level}]: ${evt.params.message.text}`);
+        }
       }
     });
+    await popupClient.send('Runtime.enable');
+    await popupClient.send('Page.enable');
+    await popupClient.send('Console.enable');
+    await popupClient.send('Log.enable');
 
     console.log(`Navigating tab to: ${popupUrl}`);
     await popupClient.send('Page.navigate', { url: popupUrl });
@@ -304,6 +311,9 @@ async function runTests() {
       await sleep(250);
     }
     await sleep(400);
+    if (popupLoadErrors.length > 0) {
+      throw new Error(`Popup emitted console/runtime errors on load: ${JSON.stringify(popupLoadErrors)}`);
+    }
 
     // Evaluate DOM elements in Popup
     const titleCheck = await popupClient.send('Runtime.evaluate', {
@@ -921,8 +931,29 @@ async function runTests() {
     const optionsTab = await optionsTabRes.json();
 
     const optionsClient = await createCdpClient(optionsTab.webSocketDebuggerUrl);
+    const optionsLoadErrors = [];
+    const optionsHardErrors = [];
+    optionsClient.onEvent((evt) => {
+      if (evt.method === 'Runtime.exceptionThrown') {
+        const msg = `Exception: ${evt.params.exceptionDetails?.text || JSON.stringify(evt.params.exceptionDetails)}`;
+        optionsLoadErrors.push(msg);
+        optionsHardErrors.push(msg);
+      } else if (evt.method === 'Log.entryAdded') {
+        const lvl = evt.params.entry?.level;
+        const msg = `Log[${lvl}]: ${evt.params.entry?.text}`;
+        if (lvl === 'error' || lvl === 'warning') optionsLoadErrors.push(msg);
+        if (lvl === 'error') optionsHardErrors.push(msg);
+      } else if (evt.method === 'Console.messageAdded') {
+        const lvl = evt.params.message?.level;
+        const msg = `Console[${lvl}]: ${evt.params.message?.text}`;
+        if (lvl === 'error' || lvl === 'warning') optionsLoadErrors.push(msg);
+        if (lvl === 'error') optionsHardErrors.push(msg);
+      }
+    });
     await optionsClient.send('Runtime.enable');
     await optionsClient.send('Page.enable');
+    await optionsClient.send('Console.enable');
+    await optionsClient.send('Log.enable');
     await optionsClient.send('Page.navigate', { url: optionsUrl });
 
     for (let r = 0; r < 20; r++) {
@@ -933,6 +964,9 @@ async function runTests() {
       await sleep(250);
     }
     await sleep(400);
+    if (optionsLoadErrors.length > 0) {
+      throw new Error(`Options emitted console/runtime errors on load: ${JSON.stringify(optionsLoadErrors)}`);
+    }
 
     const optTitle = await optionsClient.send('Runtime.evaluate', {
       expression: 'document.querySelector(".pc-brand__name")?.textContent'
@@ -975,28 +1009,45 @@ async function runTests() {
     }
     if (lkOptions.appName !== 'PromptOptimizer') throw new Error('Options: app name is "' + lkOptions.appName + '"');
 
-    // Console shell: nav, sections, theme picker
+    // Console shell: nav, sections, theme picker, Nano check button & zero page errors
     const shellCheck = await optionsClient.send('Runtime.evaluate', {
-      expression: `(() => ({
-        sections: document.querySelectorAll('.pc-section').length,
-        navItems: document.querySelectorAll('.pc-nav__item').length,
-        themePicker: Boolean(document.querySelector('#theme-picker-slot .pc-select')),
-        engineSelect: Boolean(document.querySelector('#preferred-engine-slot .pc-select')),
-        frameworkCards: document.querySelectorAll('.pc-framework').length,
-        omniSection: Boolean(document.getElementById('omniroute-base-url') && document.getElementById('omniroute-enabled') && document.getElementById('omniroute-model')),
-        openrouterFilter: Boolean(document.getElementById('openrouter-all-models-toggle') && document.getElementById('openrouter-model-filter')),
-        historyNav: Boolean(document.getElementById('history-nav-link'))
-      }))()`,
+      awaitPromise: true,
+      expression: `(async () => {
+        const checkBtn = document.getElementById('nano-check-btn');
+        const statusBefore = document.getElementById('nano-status-text')?.textContent || '';
+        const checkVisible = Boolean(checkBtn && !checkBtn.hidden);
+        checkBtn?.click();
+        await new Promise(r => setTimeout(r, 150));
+        const statusAfter = document.getElementById('nano-status-text')?.textContent || '';
+        return {
+          sections: document.querySelectorAll('.pc-section').length,
+          navItems: document.querySelectorAll('.pc-nav__item').length,
+          themePicker: Boolean(document.querySelector('#theme-picker-slot .pc-select')),
+          engineSelect: Boolean(document.querySelector('#preferred-engine-slot .pc-select')),
+          frameworkCards: document.querySelectorAll('.pc-framework').length,
+          omniSection: Boolean(document.getElementById('omniroute-base-url') && document.getElementById('omniroute-enabled') && document.getElementById('omniroute-model')),
+          openrouterFilter: Boolean(document.getElementById('openrouter-all-models-toggle') && document.getElementById('openrouter-model-filter')),
+          historyNav: Boolean(document.getElementById('history-nav-link')),
+          nanoCheckVisible: checkVisible,
+          nanoStatusBefore: statusBefore,
+          nanoStatusAfter: statusAfter
+        };
+      })()`,
       returnByValue: true
     });
     console.log('✓ Options console structure:', shellCheck.result.value);
+    if (optionsHardErrors.length > 0) {
+      throw new Error(`Options emitted uncaught errors: ${JSON.stringify(optionsHardErrors)}`);
+    }
     if (
       shellCheck.result.value.sections !== 7 ||
       shellCheck.result.value.navItems !== 7 ||
       !shellCheck.result.value.themePicker ||
       !shellCheck.result.value.omniSection ||
       !shellCheck.result.value.openrouterFilter ||
-      !shellCheck.result.value.historyNav
+      !shellCheck.result.value.historyNav ||
+      !shellCheck.result.value.nanoCheckVisible ||
+      !/Unavailable|Disabled by browser flag/i.test(shellCheck.result.value.nanoStatusAfter)
     ) {
       throw new Error('Options console did not render all expected v4 sections/controls: ' + JSON.stringify(shellCheck.result.value));
     }

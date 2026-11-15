@@ -162,6 +162,23 @@ test('judgeWithNano degrades to null on any failure, and always destroys the ses
     create: async () => { throw new Error('boom'); }
   };
   assert.equal(await judgeWithNano('d', 'r'), null, 'create() throwing');
+
+  let availCalls = 0;
+  let createOpts = null;
+  globalThis.LanguageModel = {
+    availability: async opts => {
+      availCalls++;
+      assert.deepEqual(opts?.expectedInputs, [{ type: 'text', languages: ['en'] }]);
+      assert.deepEqual(opts?.expectedOutputs, [{ type: 'text', languages: ['en'] }]);
+      const err = new Error('The feature flag gating model execution was disabled.');
+      err.name = 'NotSupportedError';
+      throw err;
+    },
+    create: async opts => { createOpts = opts; throw new Error('should not reach'); }
+  };
+  assert.equal(await judgeWithNano('d', 'r'), null);
+  assert.equal(availCalls, 1, 'NotSupportedError must not retry zero-arg availability()');
+  assert.equal(createOpts, null);
 });
 
 /* ------------------------------------------------------ variant ranking */

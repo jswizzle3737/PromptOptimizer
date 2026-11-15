@@ -276,10 +276,17 @@ body {
 }
 
 .pc-nano-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
   margin-top: var(--space-2);
 }
 
-.pc-nano-actions[hidden] {
+.pc-nano-actions[hidden],
+#nano-check-btn[hidden],
+#nano-download-btn[hidden],
+.pc-nano-help[hidden] {
   display: none;
 }
 
