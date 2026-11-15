@@ -279,7 +279,7 @@
 
   async function loadModules() {
     try {
-      const [icons, select, themePicker, engines, saveSheet, library, runClient, assist, secrets, clarify] = await Promise.all([
+      const [icons, select, themePicker, engines, saveSheet, library, runClient, assist, secrets, clarify, scorer] = await Promise.all([
         import(SHARED + 'icons.js'),
         import(SHARED + 'select.js'),
         import(SHARED + 'theme-picker.js'),
@@ -289,9 +289,10 @@
         import(SHARED + 'run-client.js'),
         import(SHARED + 'assist.js'),
         import(SHARED + 'secrets.js'),
-        import(SHARED + 'clarify.js')
+        import(SHARED + 'clarify.js'),
+        import(SHARED + 'scorer.js')
       ]);
-      return { icons, select, themePicker, engines, saveSheet, library, runClient, assist, secrets, clarify };
+      return { icons, select, themePicker, engines, saveSheet, library, runClient, assist, secrets, clarify, scorer };
     } catch (err) {
       console.warn('[PromptOptimizer] enhanced controls unavailable, falling back:', err);
       return null;
@@ -407,6 +408,9 @@
               <div class="pc-callout__body">
                 <span class="pc-callout__title" id="pc-degraded-title">Offline template used</span>
                 <span class="pc-callout__text" id="pc-degraded-reason"></span>
+                <button type="button" class="pc-btn pc-btn--secondary pc-btn--sm" id="pc-degraded-settings-btn">
+                  <span data-icon="settings" data-icon-size="13"></span><span>Open settings</span>
+                </button>
               </div>
             </div>
             <div class="pc-modal__outbox">
@@ -414,6 +418,10 @@
                 <span class="pc-empty__icon" data-icon="wand" data-icon-size="16"></span>
                 <span class="pc-empty__title">No output yet</span>
                 <span class="pc-empty__desc">Choose a framework, then press Optimize.</span>
+              </div>
+              <div class="pc-loading-state" id="pc-loading-state" hidden role="status" aria-live="polite">
+                <span class="pc-spinner"></span>
+                <span id="pc-loading-label">Preparing optimization…</span>
               </div>
               <pre class="pc-modal__outtext" id="pc-result-text" hidden></pre>
             </div>
@@ -467,10 +475,13 @@
     const optimizeBtn = $('#pc-optimize-btn');
     const resultText = $('#pc-result-text');
     const placeholder = $('#pc-placeholder');
+    const loadingState = $('#pc-loading-state');
+    const loadingLabel = $('#pc-loading-label');
     const engineBadge = $('#pc-engine-badge');
     const degradedNotice = $('#pc-degraded');
     const degradedTitle = $('#pc-degraded-title');
     const degradedReason = $('#pc-degraded-reason');
+    const degradedSettingsBtn = $('#pc-degraded-settings-btn');
     const techChips = $('#pc-tech-chips');
     const qualityChip = $('#pc-quality-chip');
     const variantChips = $('#pc-variant-chips');
@@ -662,7 +673,11 @@
       sel.style.width = '100%';
       sel.innerHTML = engineList
         .map(o => `<option value="${escapeHtml(o.value)}">${escapeHtml(o.label)} · ${escapeHtml(o.desc)}</option>`).join('');
-      sel.addEventListener('change', () => { engine = sel.value; });
+      sel.addEventListener('change', () => {
+        engine = sel.value;
+        Promise.resolve(chrome.runtime.sendMessage({ type: 'SET_ENGINE', payload: { engine } }))
+          .catch(err => console.warn('[PromptOptimizer] could not persist the engine:', err));
+      });
       engineSlot.appendChild(sel);
       nativeEngine = sel;
     }
@@ -704,7 +719,6 @@
         }
       });
       variantSlot.appendChild(variantSelect.element);
-      getSettings().then(s => setVariantCount(s.variantCount)).catch(() => {});
     }
 
     /* Storage helpers -------------------------------------------------- */
@@ -728,16 +742,23 @@
     }
 
     /* Frameworks ------------------------------------------------------- */
-    async function renderFrameworkTabs() {
+    async function renderFrameworkTabs(preloaded) {
       let frameworks = FALLBACK_FRAMEWORKS;
       let settings = {};
-      try {
-        const stored = await chrome.storage.local.get(['promptcraft_frameworks', 'promptcraft_settings']);
-        if (Array.isArray(stored.promptcraft_frameworks) && stored.promptcraft_frameworks.length) {
-          frameworks = stored.promptcraft_frameworks;
+      if (preloaded) {
+        if (Array.isArray(preloaded.frameworks) && preloaded.frameworks.length) {
+          frameworks = preloaded.frameworks;
         }
-        settings = stored.promptcraft_settings || {};
-      } catch {}
+        settings = preloaded.settings || {};
+      } else {
+        try {
+          const stored = await chrome.storage.local.get(['promptcraft_frameworks', 'promptcraft_settings']);
+          if (Array.isArray(stored.promptcraft_frameworks) && stored.promptcraft_frameworks.length) {
+            frameworks = stored.promptcraft_frameworks;
+          }
+          settings = stored.promptcraft_settings || {};
+        } catch {}
+      }
 
       if (!frameworks.some(f => f.id === activeFramework)) {
         activeFramework = settings.preferredFramework || frameworks[0]?.id || 'smart-expand';
@@ -748,12 +769,14 @@
 
       tabsContainer.innerHTML = '';
       frameworks.forEach(fw => {
+        const selected = fw.id === activeFramework;
         const tab = document.createElement('button');
         tab.type = 'button';
         tab.className = 'pc-segmented__item';
         tab.setAttribute('role', 'tab');
         tab.dataset.framework = fw.id;
-        tab.setAttribute('aria-selected', String(fw.id === activeFramework));
+        tab.setAttribute('aria-selected', String(selected));
+        tab.setAttribute('tabindex', selected ? '0' : '-1');
         tab.title = fw.tagline || fw.name;
         tab.innerHTML =
           `<span class="pc-segmented__icon">${ICON(fw.icon, 13)}</span>` +
@@ -762,17 +785,65 @@
       });
     }
 
+    function selectFrameworkTab(id, { focus = false } = {}) {
+      const tabs = [...tabsContainer.querySelectorAll('.pc-segmented__item')];
+      const target = tabs.find(t => t.dataset.framework === id);
+      if (!target) return;
+      tabs.forEach(t => {
+        const selected = t === target;
+        t.setAttribute('aria-selected', String(selected));
+        t.setAttribute('tabindex', selected ? '0' : '-1');
+      });
+      activeFramework = id;
+      if (focus) target.focus();
+      if (!busy && latest && lastFramework && activeFramework !== lastFramework) {
+        setStatus(`Switched to ${target.textContent.trim()} — click Optimize to rewrite`, 'neutral');
+      }
+    }
+
     tabsContainer.addEventListener('click', e => {
       const tab = e.target.closest('.pc-segmented__item');
-      if (!tab) return;
-      tabsContainer.querySelectorAll('.pc-segmented__item')
-        .forEach(t => t.setAttribute('aria-selected', 'false'));
-      tab.setAttribute('aria-selected', 'true');
-      activeFramework = tab.dataset.framework;
-      if (rawInput.value.trim() && latest) runOptimization();
+      if (tab) selectFrameworkTab(tab.dataset.framework);
+    });
+
+    tabsContainer.addEventListener('keydown', e => {
+      const tabs = [...tabsContainer.querySelectorAll('.pc-segmented__item')];
+      if (!tabs.length) return;
+      const idx = tabs.indexOf(shadow.activeElement);
+      if (idx === -1) return;
+      let nextIdx = -1;
+      if (e.key === 'ArrowRight') nextIdx = (idx + 1) % tabs.length;
+      else if (e.key === 'ArrowLeft') nextIdx = (idx - 1 + tabs.length) % tabs.length;
+      else if (e.key === 'Home') nextIdx = 0;
+      else if (e.key === 'End') nextIdx = tabs.length - 1;
+      if (nextIdx === -1) return;
+      e.preventDefault();
+      selectFrameworkTab(tabs[nextIdx].dataset.framework, { focus: true });
     });
 
     /* Open / close ----------------------------------------------------- */
+    let insertCloseTimer = null;
+    let waitTimer = null;
+
+    function stopWaitTimer() {
+      clearInterval(waitTimer);
+      waitTimer = null;
+      loadingState.hidden = true;
+    }
+
+    function startWaitTimer(label) {
+      stopWaitTimer();
+      let sec = 0;
+      loadingLabel.textContent = label;
+      loadingState.hidden = false;
+      waitTimer = setInterval(() => {
+        sec += 1;
+        const text = `${label} (${sec}s)`;
+        loadingLabel.textContent = text;
+        if (busy) setStatus(text, 'neutral');
+      }, 1000);
+    }
+
     async function openModal(initialText = '', autoRun = false, { fromContextMenu = false } = {}) {
       // Capture where focus was before the modal takes it, to hand it back on close.
       const active = document.activeElement;
@@ -782,10 +853,16 @@
       backdrop.classList.add('is-open');
       trigger.style.display = 'none';
 
-      const settings = await getSettings();
+      let stored = {};
+      try {
+        stored = await chrome.storage.local.get(['promptcraft_settings', 'promptcraft_frameworks']);
+      } catch {}
+      const settings = stored.promptcraft_settings || {};
       setTheme(settings.theme || 'dark');
       setEngine(settings.preferredEngine || DEFAULT_ENGINE);
-      await renderFrameworkTabs();
+      setVariantCount(settings.variantCount);
+      contextToggle.checked = Boolean(settings.includePageContext);
+      await renderFrameworkTabs({ frameworks: stored.promptcraft_frameworks, settings });
 
       if (initialText) {
         rawInput.value = initialText;
@@ -810,23 +887,43 @@
       if (autoRun && rawInput.value.trim()) runOptimization();
     }
 
-    function closeModal() {
+    function closeModal({ insertedTarget = null } = {}) {
+      clearTimeout(insertCloseTimer);
+      insertCloseTimer = null;
+      stopWaitTimer();
+      insertBtn.innerHTML = `${ICON('insert', 13)}<span>Insert</span>`;
       saveSheet?.close();
       libraryPicker?.close();
+      clarifySheet?.close();
       isModalOpen = false;
       backdrop.classList.remove('is-open');
-      if (returnFocusTo?.isConnected) returnFocusTo.focus?.({ preventScroll: true });
+      const focusTarget = (insertedTarget?.isConnected && insertedTarget)
+        || (returnFocusTo?.isConnected && returnFocusTo)
+        || null;
+      if (focusTarget) {
+        focusTarget.focus?.({ preventScroll: true });
+        if (insertedTarget && insertedTarget.isContentEditable) {
+          try {
+            const sel = window.getSelection();
+            const endRange = document.createRange();
+            endRange.selectNodeContents(insertedTarget);
+            endRange.collapse(false);
+            sel.removeAllRanges();
+            sel.addRange(endRange);
+          } catch {}
+        }
+      }
       returnFocusTo = null;
     }
 
-    closeBtn.addEventListener('click', closeModal);
+    closeBtn.addEventListener('click', () => closeModal());
     backdrop.addEventListener('click', e => {
       if (e.target === backdrop) closeModal();
     });
 
     /* Keyboard inside the dialog: Escape closes, Tab stays within it. Handled on
        the dialog rather than the window so the page never sees these keys. */
-    const FOCUSABLE = 'button:not([disabled]), textarea, input, select, [tabindex]:not([tabindex="-1"])';
+    const FOCUSABLE = 'button:not([disabled]), textarea, input:not([disabled]), select:not([disabled]), [contenteditable="plaintext-only"], [tabindex]:not([tabindex="-1"])';
     backdrop.addEventListener('keydown', e => {
       if (e.key === 'Escape') {
         e.preventDefault();
@@ -894,8 +991,18 @@
         : `${ICON('wand', 14)}<span>Optimize</span>`;
       optimizeBtn.title = next && canCancel ? 'Stop this request' : 'Optimize prompt (Ctrl+Enter)';
       askBtn.disabled = next;
+      editableCtrl?.setEditable(Boolean(latest && !next));
       resultActions?.update({ ...actionState(), busy: next });
     }
+
+    degradedSettingsBtn.addEventListener('click', async () => {
+      try {
+        const res = await chrome.runtime.sendMessage({ type: 'OPEN_OPTIONS' });
+        if (res && res.success === false) throw new Error(res.error || 'Could not open settings.');
+      } catch {
+        toast('Open the extension Options page to configure providers', 'neutral');
+      }
+    });
 
     /* Technique chips: what the optimizer added and why. textContent, not
        innerHTML — chip labels come from the result payload over messaging. */
@@ -939,6 +1046,89 @@
       qualityChip.hidden = false;
     }
 
+    /* The "before" half of the quality chip; kept across variant switches and manual edits. */
+    function scoreBefore() {
+      const m = qualityChip.textContent.match(/Quality (\d+)/);
+      return m ? parseInt(m[1], 10) : null;
+    }
+
+    /* Undo history + inline editable result ------------------------------ */
+    const undoStack = ds?.assist?.createUndoStack?.(25) || null;
+
+    function currentSnapshot() {
+      if (!latest) return null;
+      return {
+        text: latest,
+        original: lastOriginal,
+        engine: lastEngine,
+        framework: lastFramework,
+        data: lastData,
+        variants: currentVariants.slice(),
+        scoreBefore: scoreBefore()
+      };
+    }
+
+    function pushUndoSnapshot(snap = currentSnapshot()) {
+      if (snap && undoStack?.push(snap)) {
+        resultActions?.update({ ...actionState(), busy });
+      }
+    }
+
+    function restoreSnapshot(snap, { statusText = 'Reverted change' } = {}) {
+      if (!snap) return;
+      lastData = snap.data || null;
+      latest = snap.text || '';
+      lastOriginal = snap.original || '';
+      lastEngine = snap.engine || '';
+      lastFramework = snap.framework || activeFramework;
+      currentVariants = Array.isArray(snap.variants) ? snap.variants.slice() : [];
+      loadingState.hidden = true;
+      resultText.textContent = latest;
+      resultText.hidden = !latest;
+      placeholder.hidden = Boolean(latest);
+      degradedNotice.hidden = !(lastData?.degraded);
+      if (lastEngine && lastData) {
+        engineBadge.textContent = ENGINE_LABELS[lastEngine] || lastEngine;
+        engineBadge.className = 'pc-badge pc-badge--mono ' +
+          (lastData.degraded ? 'pc-badge--warning' : 'pc-badge--accent');
+        engineBadge.hidden = false;
+      } else {
+        engineBadge.hidden = true;
+      }
+      renderVariantChips();
+      renderTechChips(lastData?.techniques);
+      if (lastData?.score) renderQualityChip(lastData.score, lastOriginal);
+      else if (latest && ds?.scorer) {
+        const rule = ds.scorer.scorePrompt(latest, { traitIds: ds.scorer.contractTraitIds(lastFramework || activeFramework) });
+        renderQualityChip({ before: snap.scoreBefore ?? null, after: rule.score, missed: rule.missed, method: 'rules' }, lastOriginal);
+      } else {
+        qualityChip.hidden = true;
+      }
+      editableCtrl?.setEditable(Boolean(latest && !busy));
+      resultActions?.update({ ...actionState(), busy });
+      if (statusText) setStatus(statusText, 'neutral');
+    }
+
+    const editableCtrl = ds?.assist?.bindEditableResult
+      ? ds.assist.bindEditableResult({
+        element: resultText,
+        onSnapshot: () => pushUndoSnapshot(),
+        onEdit: editedText => {
+          latest = editedText;
+          if (lastData) lastData = { ...lastData, optimized: editedText };
+          if (ds?.scorer) {
+            const rule = ds.scorer.scorePrompt(editedText, {
+              traitIds: ds.scorer.contractTraitIds(lastFramework || activeFramework)
+            });
+            renderQualityChip({ before: scoreBefore(), after: rule.score, missed: rule.missed, method: 'rules' }, lastOriginal);
+          }
+          renderVariantChips();
+          resultActions?.update({ ...actionState(), busy });
+          setStatus('Edited', 'neutral');
+        }
+      })
+      : null;
+
     /* Variant chips: ranked alternatives; clicking swaps the result on screen
        (and with it everything downstream: copy, save, insert). */
     function renderVariantChips() {
@@ -956,44 +1146,52 @@
         btn.title = `Use this variant (quality ${variant.score ?? 'n/a'}/100)`;
         btn.setAttribute('aria-pressed', String(active));
         btn.addEventListener('click', () => {
+          if (variant.text === latest) return;
+          pushUndoSnapshot();
           latest = variant.text;
+          if (lastData) lastData = { ...lastData, optimized: latest };
           resultText.textContent = latest;
           renderVariantChips();
           renderQualityChip({ before: scoreBefore(), after: variant.score, method: 'rules' }, lastOriginal);
+          resultActions?.update({ ...actionState(), busy });
         });
         variantChips.appendChild(btn);
       });
       variantChips.hidden = false;
     }
 
-    /* The "before" half of the quality chip; kept across variant switches. */
-    function scoreBefore() {
-      const m = qualityChip.textContent.match(/Quality (\d+)/);
-      return m ? parseInt(m[1], 10) : null;
-    }
-
-    /* Refine / Continue under the result. Only for model output: a template
-       of a rewrite is not a refinement. */
+    /* Refine / Continue / Undo under the result. Only model output supports
+       refinement; undo restores the previous snapshot whenever available. */
     function actionState() {
+      const hasUndo = Boolean(undoStack?.canUndo());
       return {
-        visible: Boolean(latest && lastData),
+        visible: Boolean(latest && (lastData || hasUndo)),
         truncated: Boolean(lastData?.truncated),
-        canRefine: Boolean(lastData && lastData.engine !== 'offline')
+        canRefine: Boolean(latest && lastData && lastData.engine !== 'offline'),
+        canUndo: hasUndo
       };
     }
 
     const resultActions = ds?.assist && ds?.runClient
       ? ds.assist.createResultActions({
         onRefine: kind => runRequest({ action: 'refine', kind, previous: latest, text: lastOriginal }),
+        onCustomRefine: instruction => runRequest({
+          action: 'refine', kind: 'custom', instruction, previous: latest, text: lastOriginal
+        }),
         onContinue: () => runRequest(
           { action: 'refine', kind: 'continue', previous: latest, text: lastOriginal },
           { base: latest }
-        )
+        ),
+        onUndo: () => {
+          const prev = undoStack?.pop();
+          if (prev) restoreSnapshot(prev);
+        }
       })
       : null;
     if (resultActions) actionsSlot.appendChild(resultActions.element);
 
     function applyResult(data, original) {
+      stopWaitTimer();
       lastData = data;
       latest = data.optimized;
       lastOriginal = original;
@@ -1018,7 +1216,7 @@
         const requested = ENGINE_LABELS[data.requestedEngine] || data.requestedEngine || 'That engine';
         degradedTitle.textContent = `${requested} unavailable — offline template used`;
         degradedReason.textContent = data.degradedReason
-          ? `${data.degradedReason} The output below is a local template, not a model response. Add an API key in the toolbar popup or Options for real rewrites.`
+          ? `${data.degradedReason} The output below is a local template, not a model response.`
           : 'The output below is a local template, not a model response.';
         degradedNotice.hidden = false;
         setStatus('Offline fallback', 'warning');
@@ -1039,6 +1237,7 @@
         setStatus('Done', 'success');
         toast(data.refinement ? 'Prompt refined' : 'Prompt optimized', 'success');
       }
+      editableCtrl?.setEditable(Boolean(latest && !busy));
       resultActions?.update(actionState());
     }
 
@@ -1056,12 +1255,15 @@
     async function runRequest(payload, { base = '' } = {}) {
       if (busy) return;
       const isOptimize = !payload.action || payload.action === 'optimize';
-      const previous = { latest, data: lastData };
+      const preRunSnapshot = currentSnapshot();
       setBusy(true);
       saveSheet?.close(); // the result it was about is being replaced
       clarifySheet?.close();
       secretNotice?.hide();
-      setStatus(isOptimize ? 'Optimizing…' : 'Refining…', 'neutral');
+      const waitLabel = isOptimize && variantCount > 1
+        ? `Generating ${variantCount} variants…`
+        : (isOptimize ? 'Optimizing…' : 'Refining…');
+      setStatus(waitLabel, 'neutral');
       degradedNotice.hidden = true;
       techChips.hidden = true;
       qualityChip.hidden = true;
@@ -1069,11 +1271,18 @@
       resultActions?.update({ visible: false });
       if (isOptimize) {
         currentVariants = [];
-        if (!base) { resultText.hidden = true; placeholder.hidden = false; }
+        if (!base) {
+          resultText.hidden = true;
+          placeholder.hidden = true;
+          startWaitTimer(waitLabel);
+        }
+      } else if (!base) {
+        startWaitTimer(waitLabel);
       }
 
       let streamed = base;
       const paint = text => {
+        stopWaitTimer();
         placeholder.hidden = true;
         resultText.hidden = false;
         resultText.textContent = text;
@@ -1088,8 +1297,16 @@
           currentRun = ds.runClient.startRun(full, {
             onStart: name => {
               streamed = base;
-              setStatus(`${ENGINE_LABELS[name] || name}…`, 'neutral');
-              if (base) paint(base);
+              const engineWait = isOptimize && variantCount > 1
+                ? `${ENGINE_LABELS[name] || name} (${variantCount} variants)…`
+                : `${ENGINE_LABELS[name] || name}…`;
+              if (base) {
+                setStatus(engineWait, 'neutral');
+                paint(base);
+              } else {
+                setStatus(engineWait, 'neutral');
+                startWaitTimer(engineWait);
+              }
             },
             onToken: delta => {
               streamed += delta;
@@ -1102,16 +1319,21 @@
         }
 
         if (!data) {
-          // Cancelled: put back whatever was on screen before.
-          latest = previous.latest;
-          lastData = previous.data;
-          if (latest) { resultText.textContent = latest; resultText.hidden = false; placeholder.hidden = true; }
-          else { resultText.hidden = true; placeholder.hidden = false; }
-          setStatus('Cancelled', 'neutral');
+          stopWaitTimer();
+          if (preRunSnapshot) {
+            restoreSnapshot(preRunSnapshot, { statusText: 'Cancelled' });
+          } else {
+            resultText.hidden = true;
+            placeholder.hidden = false;
+            setStatus('Cancelled', 'neutral');
+          }
           return;
         }
+        if (preRunSnapshot) pushUndoSnapshot(preRunSnapshot);
+        if (payload.kind === 'custom') resultActions?.clearCustomInput?.();
         applyResult(data, isOptimize ? payload.text : lastOriginal);
       } catch (err) {
+        stopWaitTimer();
         if (isOptimize) {
           degradedNotice.hidden = true;
           resultText.hidden = true;
@@ -1120,14 +1342,14 @@
             <span class="pc-empty__icon">${ICON('alert', 16)}</span>
             <span class="pc-empty__title">Optimization failed</span>
             <span class="pc-empty__desc">${escapeHtml(err.message)}</span>`;
-        } else if (previous.latest) {
+        } else if (preRunSnapshot) {
           // A failed refinement leaves the result it was refining untouched.
-          resultText.textContent = previous.latest;
-          resultText.hidden = false;
+          restoreSnapshot(preRunSnapshot, { statusText: '' });
         }
         setStatus('Failed', 'danger');
         toast(err.message, 'danger');
       } finally {
+        stopWaitTimer();
         resultText.classList.remove('is-streaming');
         currentRun = null;
         setBusy(false);
@@ -1231,7 +1453,6 @@
     }
 
     /* Page context is opt-in and remembered; the worker owns the write. */
-    getSettings().then(s => { contextToggle.checked = Boolean(s.includePageContext); }).catch(() => {});
     contextToggle.addEventListener('change', () => {
       Promise.resolve(chrome.runtime.sendMessage({
         type: 'SET_PAGE_CONTEXT', payload: { enabled: contextToggle.checked }
@@ -1248,6 +1469,8 @@
         onClose: () => libraryBtn.setAttribute('aria-pressed', 'false'),
         onUse: (text, entry) => {
           setLibraryOpen(false);
+          pushUndoSnapshot();
+          stopWaitTimer();
           lastData = null;
           latest = text;
           lastOriginal = entry.original || '';
@@ -1262,6 +1485,7 @@
           resultText.textContent = text;
           resultText.hidden = false;
           placeholder.hidden = true;
+          editableCtrl?.setEditable(Boolean(latest && !busy));
           resultActions?.update(actionState());
           setStatus(`Loaded "${entry.title}"`, 'neutral');
           toast('Saved prompt ready to insert', 'success');
@@ -1341,16 +1565,18 @@
         toast('Nothing to insert yet', 'danger');
         return;
       }
-      const valid = currentTargetElement?.isConnected && isEligibleField(currentTargetElement)
+      const target = currentTargetElement?.isConnected && isEligibleField(currentTargetElement)
         ? currentTargetElement
-        : null;
+        : findChatInput();
 
-      if (insertTextIntoElement(valid, latest)) {
+      if (insertTextIntoElement(target, latest)) {
+        if (target) currentTargetElement = target;
         insertBtn.innerHTML = `${ICON('check', 13)}<span>Inserted</span>`;
         toast('Inserted into chat', 'success');
-        setTimeout(() => {
-          closeModal();
-          insertBtn.innerHTML = `${ICON('insert', 13)}<span>Insert</span>`;
+        clearTimeout(insertCloseTimer);
+        insertCloseTimer = setTimeout(() => {
+          insertCloseTimer = null;
+          closeModal({ insertedTarget: target });
         }, 350);
       } else {
         navigator.clipboard.writeText(latest);
@@ -1364,6 +1590,10 @@
       if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') return el.value;
       if (el.isContentEditable) return el.innerText || el.textContent;
       return '';
+    }
+
+    function normalizeInsertedText(str) {
+      return String(str ?? '').replace(/\r\n?/g, '\n').trim();
     }
 
     function insertTextIntoElement(el, text) {
@@ -1386,19 +1616,66 @@
       }
 
       if (el.isContentEditable) {
+        const expected = normalizeInsertedText(text);
+        const hasNewlines = expected.includes('\n');
         const selection = window.getSelection();
         const range = document.createRange();
         range.selectNodeContents(el);
         selection.removeAllRanges();
         selection.addRange(range);
-        // execCommand is tracked by ProseMirror / Lexical / Quill undo stacks.
-        const ok = document.execCommand('insertText', false, text);
-        if (!ok) {
-          el.innerText = text;
-          el.dispatchEvent(new InputEvent('input', {
-            bubbles: true, inputType: 'insertReplacementText'
-          }));
+
+        // 1. execCommand preserves ProseMirror / Lexical / Quill undo stacks when accepted cleanly.
+        let ok = false;
+        try { ok = document.execCommand('insertText', false, text); } catch { ok = false; }
+        const afterExec = normalizeInsertedText(getElementValue(el));
+        if (ok && afterExec === expected && (!hasNewlines || afterExec.includes('\n'))) {
+          return true;
         }
+
+        // 2. Synthetic plain-text paste handles multi-line blocks in rich editors that strip execCommand newlines.
+        try {
+          const dt = new DataTransfer();
+          dt.setData('text/plain', text);
+          const pasteEvt = new ClipboardEvent('paste', {
+            bubbles: true,
+            cancelable: true,
+            clipboardData: dt
+          });
+          const pasteRange = document.createRange();
+          pasteRange.selectNodeContents(el);
+          selection.removeAllRanges();
+          selection.addRange(pasteRange);
+          el.dispatchEvent(pasteEvt);
+          const afterPaste = normalizeInsertedText(getElementValue(el));
+          if (afterPaste === expected && (!hasNewlines || afterPaste.includes('\n'))) {
+            return true;
+          }
+        } catch {}
+
+        // 3. Direct DOM fallback for vanilla contenteditable boxes.
+        try {
+          el.dispatchEvent(new InputEvent('beforeinput', {
+            bubbles: true,
+            cancelable: true,
+            inputType: 'insertReplacementText',
+            data: text
+          }));
+        } catch {}
+        el.innerText = text;
+        el.dispatchEvent(new InputEvent('input', {
+          bubbles: true,
+          composed: true,
+          inputType: 'insertReplacementText',
+          data: text
+        }));
+        el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+        try {
+          const endRange = document.createRange();
+          endRange.selectNodeContents(el);
+          endRange.collapse(false);
+          selection.removeAllRanges();
+          selection.addRange(endRange);
+        } catch {}
         return true;
       }
 
@@ -1406,22 +1683,61 @@
     }
 
     /* Trigger positioning ---------------------------------------------- */
+    let targetResizeObserver = null;
+    let observedTarget = null;
+    const reposition = () => {
+      if (currentTargetElement && !isModalOpen) positionTrigger(currentTargetElement);
+    };
+
+    function observeTarget(el) {
+      if (el === observedTarget) return;
+      targetResizeObserver?.disconnect();
+      observedTarget = el && el.isConnected ? el : null;
+      if (!observedTarget || typeof ResizeObserver !== 'function') return;
+      try {
+        targetResizeObserver ??= new ResizeObserver(reposition);
+        targetResizeObserver.observe(observedTarget);
+      } catch {}
+    }
+
     function positionTrigger(targetEl) {
       if (!targetEl || isModalOpen) return;
       // Nothing shows while focus sits in a field we must not serve (a password
       // box, say) — including when a delayed re-scan fires with it focused.
       const active = document.activeElement;
-      if (!widgetEnabled || (isFieldLike(active) && !isEligibleField(active))) {
+      if (!widgetEnabled || !targetEl.isConnected || (isFieldLike(active) && !isEligibleField(active))) {
         trigger.style.display = 'none';
         return;
       }
+      const style = getComputedStyle(targetEl);
+      if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity) === 0) {
+        trigger.style.display = 'none';
+        return;
+      }
+      observeTarget(targetEl);
       const rect = targetEl.getBoundingClientRect();
-      if (rect.width === 0 && rect.height === 0) return;
+      if ((rect.width === 0 && rect.height === 0) ||
+          rect.bottom <= 0 ||
+          rect.top >= window.innerHeight ||
+          rect.right <= 0 ||
+          rect.left >= window.innerWidth) {
+        trigger.style.display = 'none';
+        return;
+      }
 
-      const top = Math.max(10, rect.top - 36);
+      let rawTop;
+      if (rect.top >= 46) {
+        rawTop = rect.top - 36;
+      } else if (rect.bottom + 8 <= window.innerHeight - 36) {
+        rawTop = rect.bottom + 8;
+      } else {
+        rawTop = Math.max(8, rect.top + 8);
+      }
+      const top = Math.max(8, Math.min(window.innerHeight - 36, rawTop));
       const left = Math.min(window.innerWidth - 140, Math.max(10, rect.right - 132));
 
       requestAnimationFrame(() => {
+        if (isModalOpen || !targetEl.isConnected) return;
         trigger.style.top = `${top}px`;
         trigger.style.left = `${left}px`;
         trigger.style.display = 'flex';
@@ -1444,6 +1760,8 @@
       if (input) {
         currentTargetElement = input;
         positionTrigger(input);
+      } else {
+        trigger.style.display = 'none';
       }
     }
 
@@ -1489,10 +1807,7 @@
       lastContextTarget = fieldFrom(e.target);
     }, true);
 
-    const reposition = () => {
-      if (currentTargetElement && !isModalOpen) positionTrigger(currentTargetElement);
-    };
-    window.addEventListener('scroll', reposition, { passive: true });
+    window.addEventListener('scroll', reposition, { capture: true, passive: true });
     window.addEventListener('resize', reposition, { passive: true });
 
     chrome.storage.onChanged.addListener((changes, area) => {
@@ -1502,6 +1817,8 @@
       const next = changes.promptcraft_settings?.newValue;
       if (next?.theme) setTheme(next.theme);
       if (next?.preferredEngine) setEngine(next.preferredEngine);
+      if (next?.variantCount != null) setVariantCount(next.variantCount);
+      if (typeof next?.includePageContext === 'boolean') contextToggle.checked = next.includePageContext;
       if (next && (next.enableFloatingWidget !== false) !== widgetEnabled) {
         widgetEnabled = next.enableFloatingWidget !== false;
         if (widgetEnabled) autoDetectAndPosition();
@@ -1511,12 +1828,18 @@
 
     /* Initial state ----------------------------------------------------- */
     (async () => {
-      const settings = await getSettings();
+      let stored = {};
+      try {
+        stored = await chrome.storage.local.get(['promptcraft_settings', 'promptcraft_frameworks']);
+      } catch {}
+      const settings = stored.promptcraft_settings || {};
       widgetEnabled = settings.enableFloatingWidget !== false;
       setTheme(settings.theme || 'dark');
       setEngine(settings.preferredEngine || DEFAULT_ENGINE);
+      setVariantCount(settings.variantCount);
+      contextToggle.checked = Boolean(settings.includePageContext);
       if (settings.preferredFramework) activeFramework = settings.preferredFramework;
-      await renderFrameworkTabs();
+      await renderFrameworkTabs({ frameworks: stored.promptcraft_frameworks, settings });
 
       if (widgetEnabled) {
         autoDetectAndPosition();

@@ -91,6 +91,19 @@ body {
   padding: var(--space-4);
 }
 
+.pc-field__meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.pc-clear-btn {
+  width: 22px;
+  height: 22px;
+}
+
+.pc-clear-btn[hidden] { display: none; }
+
 .pc-meter {
   font-family: var(--font-mono);
   font-size: var(--text-xs);

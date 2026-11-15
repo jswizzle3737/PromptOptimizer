@@ -126,6 +126,16 @@ const JUDGE_SYSTEM_PROMPT =
 /** Skip the model judge when the rule check is already confident. */
 export const NANO_JUDGE_RULE_THRESHOLD = 80;
 
+let nanoJudgeBackend = null;
+export function setNanoJudgeBackend(backend) { nanoJudgeBackend = backend; }
+
+function parseJudgeScore(reply) {
+  const m = String(reply ?? '').match(/"score"\s*:\s*(\d{1,3})/);
+  if (!m) return null;
+  const score = Math.max(0, Math.min(100, parseInt(m[1], 10)));
+  return Number.isNaN(score) ? null : { score };
+}
+
 /**
  * Judge a rewrite with Chrome's built-in model. Never throws: any failure
  * (unsupported, busy, unparseable reply) resolves to null and the caller
@@ -133,9 +143,23 @@ export const NANO_JUDGE_RULE_THRESHOLD = 80;
  */
 export async function judgeWithNano(rawPrompt, optimized, timeoutMs = 15000) {
   let session;
+  const userMessage =
+    `Raw draft:\n<raw_prompt>\n${String(rawPrompt ?? '').slice(0, 4000)}\n</raw_prompt>\n\n` +
+    `Rewrite to judge:\n<rewrite>\n${String(optimized ?? '').slice(0, 6000)}\n</rewrite>`;
   try {
     const LanguageModel = globalThis.LanguageModel;
-    if (!LanguageModel) return null;
+    if (!LanguageModel) {
+      if (!nanoJudgeBackend) return null;
+      const status = await nanoJudgeBackend.status().catch(() => null);
+      if (!status?.available) return null;
+      const out = await nanoJudgeBackend.prompt({
+        systemPrompt: JUDGE_SYSTEM_PROMPT,
+        userMessage,
+        timeoutMs,
+        signal: AbortSignal.timeout(timeoutMs)
+      });
+      return parseJudgeScore(out?.text);
+    }
 
     let availability;
     try {
@@ -150,16 +174,11 @@ export async function judgeWithNano(rawPrompt, optimized, timeoutMs = 15000) {
     });
 
     const reply = await session.prompt(
-      `Raw draft:\n<raw_prompt>\n${String(rawPrompt ?? '').slice(0, 4000)}\n</raw_prompt>\n\n` +
-      `Rewrite to judge:\n<rewrite>\n${String(optimized ?? '').slice(0, 6000)}\n</rewrite>`,
+      userMessage,
       { signal: AbortSignal.timeout(timeoutMs) }
     );
 
-    const m = String(reply ?? '').match(/"score"\s*:\s*(\d{1,3})/);
-    if (!m) return null;
-    const score = Math.max(0, Math.min(100, parseInt(m[1], 10)));
-    if (Number.isNaN(score)) return null;
-    return { score };
+    return parseJudgeScore(reply);
   } catch {
     return null;
   } finally {

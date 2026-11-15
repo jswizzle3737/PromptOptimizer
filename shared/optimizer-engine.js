@@ -3,12 +3,14 @@ import { checkLocalNanoStatus, runLocalNano } from './nano.js';
 import { DEFAULT_CLARIFY_QUESTIONS, parseQuestions } from './clarify.js';
 
 export { DEFAULT_CLARIFY_QUESTIONS, parseQuestions, withAnswers } from './clarify.js';
-import { getSettings, PROVIDER_DEFAULTS } from './storage.js';
+import { getSettings, PROVIDER_DEFAULTS, normalizeBaseUrl } from './storage.js';
 import { DEFAULT_ENGINE } from './engines.js';
 import { getTargetProfile, buildExplanationChips } from './target-profiles.js';
 import {
-  scorePrompt, judgeWithNano, contractTraitIds, rankVariants, NANO_JUDGE_RULE_THRESHOLD
+  scorePrompt, judgeWithNano, setNanoJudgeBackend, contractTraitIds, rankVariants, NANO_JUDGE_RULE_THRESHOLD
 } from './scorer.js';
+
+export { setNanoJudgeBackend };
 
 /** A hung request must end in a visible fallback, not an endless spinner.
     Long rewrites from larger models routinely take 20-30s, so keep headroom. */
@@ -220,7 +222,35 @@ const PROVIDERS = {
   openrouter: chatCompletionsSpec('OpenRouter', 'https://openrouter.ai/api/v1/chat/completions', {
     'HTTP-Referer': 'https://github.com/promptcraft-extension',
     'X-Title': 'PromptOptimizer Chrome Extension'
-  })
+  }),
+
+  omniroute: {
+    name: 'OmniRoute',
+    request: ({ systemPrompt, userMessage, apiKey, model, baseUrl, maxTokens, stream }) => {
+      const base = normalizeBaseUrl(baseUrl || PROVIDER_DEFAULTS.omniroute.baseUrl);
+      if (!base) {
+        throw new Error('OmniRoute Base URL is invalid. Enter an http:// or https:// URL in Options.');
+      }
+      const key = String(apiKey || '').trim();
+      return {
+        url: `${base}/chat/completions`,
+        headers: key ? { Authorization: `Bearer ${key}` } : {},
+        body: {
+          model: String(model || '').trim() || PROVIDER_DEFAULTS.omniroute.model,
+          messages: chatMessages(systemPrompt, userMessage),
+          temperature: TEMPERATURE,
+          ...(maxTokens && { max_tokens: maxTokens }),
+          ...(stream && { stream: true })
+        }
+      };
+    },
+    extract: data => data.choices?.[0]?.message?.content,
+    truncated: data => data.choices?.[0]?.finish_reason === 'length',
+    parseEvent: data => ({
+      delta: data.choices?.[0]?.delta?.content || '',
+      truncated: data.choices?.[0]?.finish_reason === 'length'
+    })
+  }
 };
 
 function chatMessages(systemPrompt, userMessage) {
@@ -245,7 +275,7 @@ export class CancelledError extends Error {
  * `userMessage` overrides the standard wrapped draft (refine / continue).
  * @returns {{ url: string, init: RequestInit }}
  */
-export function buildProviderRequest(engine, { systemPrompt = '', rawPrompt, userMessage, apiKey, model, maxTokens, stream = false }) {
+export function buildProviderRequest(engine, { systemPrompt = '', rawPrompt, userMessage, apiKey, model, baseUrl, maxTokens, stream = false }) {
   const spec = PROVIDERS[engine];
   if (!spec) throw new Error(`Unknown engine "${engine}".`);
 
@@ -254,6 +284,7 @@ export function buildProviderRequest(engine, { systemPrompt = '', rawPrompt, use
     userMessage: userMessage ?? buildUserMessage(rawPrompt),
     apiKey: String(apiKey || '').trim(),
     model,
+    baseUrl,
     maxTokens,
     stream
   });
@@ -284,6 +315,36 @@ function calculateRetryDelay(attempt, baseDelay = BASE_RETRY_DELAY_MS, maxDelay 
   return Math.min(exponentialDelay + jitter, maxDelay);
 }
 
+function parseRetryAfterMs(header, attempt) {
+  const raw = String(header ?? '').trim();
+  if (!raw) return calculateRetryDelay(attempt);
+  if (/^\d+(?:\.\d+)?$/.test(raw)) {
+    return Math.max(0, Math.min(Number(raw) * 1000, MAX_RETRY_DELAY_MS));
+  }
+  const targetMs = Date.parse(raw);
+  if (Number.isFinite(targetMs)) {
+    return Math.max(0, Math.min(targetMs - Date.now(), MAX_RETRY_DELAY_MS));
+  }
+  return calculateRetryDelay(attempt);
+}
+
+async function readApiErrorDetail(response) {
+  const raw = await response.text().catch(() => '');
+  const trimmed = String(raw || '').trim();
+  if (trimmed) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      const item = Array.isArray(parsed) ? parsed[0] : parsed;
+      const msg = item?.error?.message || item?.message || item?.detail;
+      if (typeof msg === 'string' && msg.trim()) return msg.trim();
+    } catch { /* non-JSON error body */ }
+    if (!/^<!doctype|^<html/i.test(trimmed)) {
+      return trimmed.replace(/\s+/g, ' ').slice(0, 180);
+    }
+  }
+  return response.statusText || 'Request failed';
+}
+
 function sleep(ms, signal) {
   return new Promise((resolve, reject) => {
     const t = setTimeout(resolve, ms);
@@ -301,6 +362,7 @@ async function readEventStream(response, spec, onToken, onActivity) {
   let buffer = '';
   let text = '';
   let truncated = false;
+  let finished = false;
 
   const handleLine = line => {
     if (!line.startsWith('data:')) return;
@@ -316,18 +378,25 @@ async function readEventStream(response, spec, onToken, onActivity) {
     if (ev.truncated) truncated = true;
   };
 
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    onActivity();
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split(/\r?\n/);
-    buffer = lines.pop();
-    lines.forEach(handleLine);
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) { finished = true; break; }
+      onActivity();
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop();
+      lines.forEach(handleLine);
+    }
+    buffer += decoder.decode();
+    if (buffer) handleLine(buffer);
+    return { text, truncated };
+  } finally {
+    if (!finished) {
+      try { await reader.cancel(); } catch { /* already closed */ }
+    }
+    try { reader.releaseLock(); } catch { /* released */ }
   }
-  buffer += decoder.decode();
-  if (buffer) handleLine(buffer);
-  return { text, truncated };
 }
 
 /**
@@ -339,7 +408,8 @@ async function readEventStream(response, spec, onToken, onActivity) {
  */
 export async function sendProviderRequest(engine, params, timeoutMs, io = {}) {
   const spec = PROVIDERS[engine];
-  if (!String(params.apiKey || '').trim()) {
+  if (!spec) throw new Error(`Unknown engine "${engine}".`);
+  if (engine !== 'omniroute' && !String(params.apiKey || '').trim()) {
     throw new Error(`${spec.name} API key is missing. Add it in Extension Options.`);
   }
   const { signal, onToken } = io;
@@ -379,17 +449,19 @@ export async function sendProviderRequest(engine, params, timeoutMs, io = {}) {
         await sleep(delay, signal);
         continue;
       }
+      if (engine === 'omniroute') {
+        throw new Error(`${spec.name} gateway unreachable at ${url} (${err.message}). Verify the gateway is running and permitted in Extension Options.`);
+      }
       throw new Error(`${spec.name} could not be reached after ${MAX_RETRIES + 1} attempts: ${err.message}`);
     }
 
     let retryDelay = null;
     try {
       if (!response.ok) {
-        const errData = await response.json().catch(() => ({}));
-        const errorMessage = `${spec.name} API error (${response.status}): ${errData.error?.message || response.statusText}`;
+        const detail = await readApiErrorDetail(response);
+        const errorMessage = `${spec.name} API error (${response.status}): ${detail}`;
         if (isRetryableStatus(response.status) && attempt < MAX_RETRIES) {
-          const retryAfter = response.headers.get('Retry-After');
-          retryDelay = retryAfter ? Math.min(parseInt(retryAfter, 10) * 1000, MAX_RETRY_DELAY_MS) : calculateRetryDelay(attempt);
+          retryDelay = parseRetryAfterMs(response.headers.get('Retry-After'), attempt);
           console.warn(`${spec.name} returned ${response.status} (attempt ${attempt + 1}/${MAX_RETRIES + 1}), retrying in ${Math.round(retryDelay)}ms`);
         } else {
           throw new Error(errorMessage);
@@ -419,12 +491,20 @@ export async function sendProviderRequest(engine, params, timeoutMs, io = {}) {
 }
 
 /** @returns {Promise<{ text: string, truncated: boolean }>} */
-async function optimizeWithProvider(engine, { systemPrompt, userMessage, apiKey, model }, timeoutMs, io) {
+async function optimizeWithProvider(engine, { systemPrompt, userMessage, apiKey, model, baseUrl }, timeoutMs, io) {
   const { spec, data, streamed } = await sendProviderRequest(
-    engine, { systemPrompt, userMessage, apiKey, model }, timeoutMs, io
+    engine, { systemPrompt, userMessage, apiKey, model, baseUrl }, timeoutMs, io
   );
   const text = streamed ? streamed.text : spec.extract(data);
-  if (!text) throw new Error(`${spec.name} returned an empty response.`);
+  if (!text) {
+    if (engine === 'gemini' && data) {
+      const block = data.promptFeedback?.blockReason;
+      const finish = data.candidates?.[0]?.finishReason;
+      if (block) throw new Error(`${spec.name} blocked the request (${block}).`);
+      if (finish && finish !== 'STOP') throw new Error(`${spec.name} stopped early (${finish}) with no output.`);
+    }
+    throw new Error(`${spec.name} returned an empty response.`);
+  }
   return { text, truncated: streamed ? streamed.truncated : Boolean(spec.truncated(data)) };
 }
 
@@ -432,14 +512,15 @@ async function optimizeWithProvider(engine, { systemPrompt, userMessage, apiKey,
  * Connection check used by Options. Resolves if the provider accepts the key and
  * model; otherwise throws with the provider's own message.
  */
-export async function verifyProvider(engine, { apiKey, model, timeoutMs = 15000 }) {
+export async function verifyProvider(engine, { apiKey, model, baseUrl, timeoutMs = 15000 }) {
   await sendProviderRequest(
     engine,
     {
       rawPrompt: 'ping',
       apiKey,
       model: model || PROVIDER_DEFAULTS[engine]?.model,
-      maxTokens: 5
+      baseUrl,
+      maxTokens: 16
     },
     timeoutMs
   );
@@ -487,7 +568,8 @@ async function runEngineOnce(engine, task, timeoutMs, settings, io = {}) {
       systemPrompt: task.systemPrompt,
       userMessage: task.userMessage,
       apiKey: settings[`${engine}ApiKey`],
-      model: settings[`${engine}Model`] || PROVIDER_DEFAULTS[engine].model
+      model: settings[`${engine}Model`] || PROVIDER_DEFAULTS[engine].model,
+      baseUrl: settings[`${engine}BaseUrl`]
     }, timeoutMs, io);
   return { text: cleanModelOutput(out.text), truncated: Boolean(out.truncated) };
 }
@@ -605,6 +687,8 @@ async function produceLLMResult({ engine, trimmed, task, timeoutMs, settings, fr
     const missed = (after.missed || []).map(t => t.label).join('; ');
     if (missed) {
       try {
+        const streamingRetry = typeof io.onToken === 'function';
+        if (streamingRetry) io.onStart?.(engine);
         const retry = await runEngineOnce(
           engine,
           {
@@ -614,7 +698,7 @@ async function produceLLMResult({ engine, trimmed, task, timeoutMs, settings, fr
           },
           timeoutMs,
           settings,
-          { signal: io.signal }
+          streamingRetry ? io : { signal: io.signal }
         );
         if (retry.text) {
           const retryScore = await scoreOptimized({
@@ -745,10 +829,16 @@ export async function optimizePrompt(rawPrompt, options = {}) {
   });
 }
 
-/** Cloud providers with a saved key, other than the one that just failed. */
+/** Cloud providers with a saved key (or enabled OmniRoute), other than the one that just failed. */
 function fallbackEngines(failed, settings) {
-  return Object.keys(PROVIDERS).filter(id =>
-    id !== failed && typeof settings[`${id}ApiKey`] === 'string' && settings[`${id}ApiKey`].trim());
+  if (settings.allowCloudFallback === false) return [];
+  return Object.keys(PROVIDERS).filter(id => {
+    if (id === failed) return false;
+    if (id === 'omniroute') {
+      return Boolean(settings.omnirouteEnabled || String(settings.omnirouteApiKey || '').trim());
+    }
+    return typeof settings[`${id}ApiKey`] === 'string' && settings[`${id}ApiKey`].trim();
+  });
 }
 
 /**
@@ -867,17 +957,20 @@ export function joinContinuation(base, continuation) {
 }
 
 /**
- * Apply a one-tap refinement ('shorter' | 'formal' | 'examples') to a previous
- * rewrite, or finish a cut-off one ('continue'). Needs an AI engine; falls back
- * across keyed providers like optimizePrompt, but never to the offline
- * template — a template of a rewrite is not a refinement. Throws instead.
+ * Apply a one-tap refinement ('shorter' | 'formal' | 'examples' | 'custom') to
+ * a previous rewrite, or finish a cut-off one ('continue'). Needs an AI engine;
+ * falls back across keyed providers like optimizePrompt, but never to the
+ * offline template — a template of a rewrite is not a refinement. Throws instead.
  */
 export async function refinePrompt(rawPrompt, options = {}) {
   const { kind } = options;
   const base = String(options.previous || '').trim();
   if (!base) throw new Error('Nothing to refine yet. Optimize a prompt first.');
   const isContinue = kind === 'continue';
-  if (!isContinue && !REFINEMENTS[kind]) throw new Error(`Unknown refinement "${kind}".`);
+  const isCustom = kind === 'custom';
+  const customInstruction = isCustom ? String(options.instruction || '').trim() : '';
+  if (!isContinue && !isCustom && !REFINEMENTS[kind]) throw new Error(`Unknown refinement "${kind}".`);
+  if (isCustom && !customInstruction) throw new Error('Enter a refinement instruction first.');
 
   const settings = await getSettings();
   const engine = options.engine || settings.preferredEngine || DEFAULT_ENGINE;
@@ -889,6 +982,9 @@ export async function refinePrompt(rawPrompt, options = {}) {
   const timeoutMs = options.timeoutMs ?? REQUEST_TIMEOUT_MS;
   const draft = String(rawPrompt || '').trim();
 
+  const safeCustom = customInstruction
+    ? escapeRawPromptTags(customInstruction).replace(/<\/?instruction>/gi, '')
+    : '';
   const task = isContinue
     ? {
       systemPrompt: `${CONTINUE_SYSTEM}\n\n${RAW_PROMPT_RULE}`,
@@ -897,12 +993,15 @@ export async function refinePrompt(rawPrompt, options = {}) {
     }
     : {
       systemPrompt: [
-        `You are editing an already-optimized prompt. ${REFINEMENTS[kind].instruction} ` +
-        'Return only the revised prompt, with no commentary.',
+        isCustom
+          ? 'You are editing an already-optimized prompt. Follow the user\'s revision instruction inside <instruction> tags accurately without altering unrequested parts. Return only the revised prompt, with no commentary.'
+          : `You are editing an already-optimized prompt. ${REFINEMENTS[kind].instruction} Return only the revised prompt, with no commentary.`,
         targetProfile?.systemGuidance,
         RAW_PROMPT_RULE
       ].filter(Boolean).join('\n\n'),
-      userMessage: buildUserMessage(base)
+      userMessage: isCustom
+        ? `${buildUserMessage(base)}\n\n<instruction>\n${safeCustom}\n</instruction>`
+        : buildUserMessage(base)
     };
 
   const io = { signal: options.signal, onToken: options.onToken, onStart: options.onStart };

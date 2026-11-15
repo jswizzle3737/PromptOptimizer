@@ -69,6 +69,12 @@ body {
   gap: var(--space-2);
   font-size: var(--text-xs);
   color: var(--text-tertiary);
+  white-space: nowrap;
+}
+
+.pc-appbar__status.is-dirty {
+  color: var(--warning-fg);
+  font-weight: var(--weight-medium);
 }
 
 /* --------------------------------------------------------------------------
@@ -249,9 +255,34 @@ body {
   color: var(--text-primary);
 }
 
+.pc-switch--compact {
+  gap: var(--space-2);
+}
+
+.pc-switch--compact .pc-switch__label {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+
 /* --------------------------------------------------------------------------
-   Nano help
+   Nano help & download actions
    -------------------------------------------------------------------------- */
+.pc-nano-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  flex: 1;
+  min-width: 0;
+}
+
+.pc-nano-actions {
+  margin-top: var(--space-2);
+}
+
+.pc-nano-actions[hidden] {
+  display: none;
+}
+
 .pc-nano-help {
   display: block;
   margin-top: var(--space-2);
@@ -403,15 +434,23 @@ body {
   .pc-theme-slot { width: 100%; }
 
   .pc-appbar { padding: 0 var(--space-4); }
+  .pc-history-entry__grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+@media (max-width: 560px) {
   .pc-appbar__status { display: none; }
 }
 
 /* --------------------------------------------------------------------------
-   Library — saved prompts
+   Library & History
    -------------------------------------------------------------------------- */
 .pc-searchbox {
   position: relative;
   margin-top: var(--space-4);
+}
+
+.pc-searchbox--tight {
+  margin-top: 0;
 }
 
 .pc-searchbox__icon {
@@ -504,6 +543,38 @@ body {
   color: var(--text-secondary);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.pc-history-entry__meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.pc-history-entry__grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+.pc-history-entry__pane {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+  padding: var(--space-2) var(--space-3);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+
+.pc-history-entry__label {
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
 }
 
 .pc-library__empty {

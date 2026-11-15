@@ -27,16 +27,103 @@ export const REFINE_ACTIONS = [
 ];
 
 /* ------------------------------------------------------------------ */
+/* Undo history & inline editable output                               */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Bounded stack of result snapshots so users can revert AI refinements,
+ * variant switches, or manual inline edits before copying/inserting.
+ */
+export function createUndoStack(limit = 25) {
+  let stack = [];
+  return {
+    push(snapshot) {
+      if (!snapshot || typeof snapshot.text !== 'string' || !snapshot.text.trim()) return false;
+      const prev = stack[stack.length - 1];
+      if (prev && prev.text === snapshot.text && prev.framework === snapshot.framework) return false;
+      stack.push({ ...snapshot });
+      if (stack.length > limit) stack = stack.slice(stack.length - limit);
+      return true;
+    },
+    pop() { return stack.pop() || null; },
+    peek() { return stack[stack.length - 1] || null; },
+    canUndo: () => stack.length > 0,
+    size: () => stack.length,
+    clear() { stack = []; },
+    toJSON: () => stack.slice(),
+    load(entries) {
+      stack = Array.isArray(entries)
+        ? entries.filter(e => e && typeof e.text === 'string' && e.text.trim()).slice(-limit)
+        : [];
+    }
+  };
+}
+
+/**
+ * Make a <pre> output surface editable (`contenteditable="plaintext-only"`)
+ * while idle so users can tweak text directly without breaking streaming or
+ * auto-expanding layout height.
+ */
+export function bindEditableResult({ element, onSnapshot, onEdit } = {}) {
+  let active = false;
+  let burstOpen = false;
+  let burstTimer = null;
+
+  const readPlain = () => String(element.textContent ?? '').replace(/\r\n?/g, '\n');
+
+  const closeBurst = () => {
+    clearTimeout(burstTimer);
+    burstTimer = null;
+    burstOpen = false;
+  };
+
+  element.addEventListener('beforeinput', () => {
+    if (!active) return;
+    if (!burstOpen) {
+      onSnapshot?.();
+      burstOpen = true;
+    }
+    clearTimeout(burstTimer);
+    burstTimer = setTimeout(() => { burstOpen = false; }, 900);
+  });
+
+  element.addEventListener('input', () => {
+    if (!active) return;
+    onEdit?.(readPlain());
+  });
+
+  element.addEventListener('blur', closeBurst);
+
+  return {
+    setEditable(editable) {
+      active = Boolean(editable);
+      if (active) {
+        element.setAttribute('contenteditable', 'plaintext-only');
+        element.setAttribute('spellcheck', 'true');
+        element.dataset.editable = 'true';
+      } else {
+        closeBurst();
+        element.removeAttribute('contenteditable');
+        delete element.dataset.editable;
+      }
+    },
+    resetBurst: closeBurst
+  };
+}
+
+/* ------------------------------------------------------------------ */
 /* Result actions                                                      */
 /* ------------------------------------------------------------------ */
 
 /**
  * @param {object} cfg
  * @param {(kind: string) => void} cfg.onRefine
+ * @param {(instruction: string) => void} [cfg.onCustomRefine]
  * @param {() => void} cfg.onContinue
- * @returns {{ element: HTMLElement, update: (s: { visible?: boolean, truncated?: boolean, canRefine?: boolean, busy?: boolean }) => void }}
+ * @param {() => void} [cfg.onUndo]
+ * @returns {{ element: HTMLElement, update: (s: { visible?: boolean, truncated?: boolean, canRefine?: boolean, canUndo?: boolean, busy?: boolean }) => void, clearCustomInput: () => void }}
  */
-export function createResultActions({ onRefine, onContinue } = {}) {
+export function createResultActions({ onRefine, onCustomRefine, onContinue, onUndo } = {}) {
   const root = document.createElement('div');
   root.className = 'pc-assist';
   root.hidden = true;
@@ -51,32 +138,60 @@ export function createResultActions({ onRefine, onContinue } = {}) {
         </button>
       </div>
     </div>
-    <div class="pc-assist__refine" role="group" aria-label="Refine the result">
-      <span class="pc-assist__label">Refine</span>
-      ${REFINE_ACTIONS.map(a => `
-        <button type="button" class="pc-btn pc-btn--ghost pc-btn--sm pc-assist__chip" data-kind="${a.kind}">
-          ${icon(a.icon, { size: 12 })}<span>${escapeHtml(a.label)}</span>
-        </button>`).join('')}
+    <div class="pc-assist__bar">
+      <div class="pc-assist__refine" role="group" aria-label="Refine the result">
+        <span class="pc-assist__label">Refine</span>
+        ${REFINE_ACTIONS.map(a => `
+          <button type="button" class="pc-btn pc-btn--ghost pc-btn--sm pc-assist__chip" data-kind="${a.kind}">
+            ${icon(a.icon, { size: 12 })}<span>${escapeHtml(a.label)}</span>
+          </button>`).join('')}
+      </div>
+      <button type="button" class="pc-btn pc-btn--ghost pc-btn--sm pc-assist__undo" data-act="undo" title="Undo last change" hidden>
+        ${icon('reset', { size: 12 })}<span>Undo</span>
+      </button>
     </div>
+    <form class="pc-assist__custom" novalidate hidden>
+      <input type="text" class="pc-input pc-assist__custom-input" placeholder="Custom tweak (e.g., focus on security, output YAML)" aria-label="Custom refinement instruction" autocomplete="off">
+      <button type="submit" class="pc-btn pc-btn--secondary pc-btn--sm pc-assist__custom-btn" data-act="custom-refine">Apply</button>
+    </form>
   `;
 
   const cutoff = root.querySelector('.pc-assist__cutoff');
+  const bar = root.querySelector('.pc-assist__bar');
   const refine = root.querySelector('.pc-assist__refine');
+  const undoBtn = root.querySelector('[data-act="undo"]');
+  const customForm = root.querySelector('.pc-assist__custom');
+  const customInput = root.querySelector('.pc-assist__custom-input');
   const buttons = [...root.querySelectorAll('button')];
 
   root.querySelector('[data-act="continue"]').addEventListener('click', () => onContinue?.());
+  undoBtn.addEventListener('click', () => onUndo?.());
   refine.addEventListener('click', e => {
     const btn = e.target.closest('[data-kind]');
     if (btn) onRefine?.(btn.dataset.kind);
   });
+  customForm.addEventListener('submit', e => {
+    e.preventDefault();
+    const instruction = customInput.value.trim();
+    if (!instruction) {
+      customInput.focus();
+      return;
+    }
+    onCustomRefine?.(instruction);
+  });
 
   return {
     element: root,
-    update({ visible = false, truncated = false, canRefine = true, busy = false } = {}) {
+    clearCustomInput() { customInput.value = ''; },
+    update({ visible = false, truncated = false, canRefine = true, canUndo = false, busy = false } = {}) {
       cutoff.hidden = !truncated;
       refine.hidden = !canRefine;
-      root.hidden = !visible || (!truncated && !canRefine);
+      customForm.hidden = !canRefine;
+      undoBtn.hidden = !canUndo;
+      bar.hidden = !canRefine && !canUndo;
+      root.hidden = !visible || (!truncated && !canRefine && !canUndo);
       buttons.forEach(b => { b.disabled = busy; });
+      customInput.disabled = busy;
     }
   };
 }

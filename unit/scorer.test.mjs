@@ -2,7 +2,7 @@ import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { installChromeStub } from './helpers.mjs';
 import {
-  scorePrompt, judgeWithNano, contractTraitIds, rankVariants, SCORING_TRAITS
+  scorePrompt, judgeWithNano, setNanoJudgeBackend, contractTraitIds, rankVariants, SCORING_TRAITS
 } from '../shared/scorer.js';
 import { generateOfflineOptimization, DEFAULT_FRAMEWORKS } from '../shared/frameworks.js';
 import { optimizePrompt } from '../shared/optimizer-engine.js';
@@ -13,10 +13,12 @@ const originalLanguageModel = globalThis.LanguageModel;
 beforeEach(() => {
   globalThis.chrome = originalChrome;
   globalThis.LanguageModel = originalLanguageModel;
+  setNanoJudgeBackend(null);
 });
 afterEach(() => {
   globalThis.chrome = originalChrome;
   globalThis.LanguageModel = originalLanguageModel;
+  setNanoJudgeBackend(null);
 });
 
 /* Fixed corpus: the raw prompts every offline output must beat. This is the
@@ -31,7 +33,7 @@ const CORPUS = [
 ];
 
 function offlineSettings() {
-  installChromeStub({ promptcraft_settings: { schemaVersion: 3, preferredEngine: 'offline' } });
+  installChromeStub({ promptcraft_settings: { schemaVersion: 4, preferredEngine: 'offline' } });
 }
 
 /* ------------------------------------------------------------ rubric */
@@ -126,6 +128,20 @@ test('judgeWithNano parses a well-formed verdict', async () => {
   fakeJudgeQueue(['{"score": 88, "note": "solid"}']);
   const r = await judgeWithNano('draft', 'Act as an expert. Output format: markdown.');
   assert.deepEqual(r, { score: 88 });
+});
+
+test('judgeWithNano routes through registered backend when LanguageModel is absent', async () => {
+  delete globalThis.LanguageModel;
+  setNanoJudgeBackend({
+    status: async () => ({ available: true, status: 'available' }),
+    prompt: async ({ systemPrompt, userMessage }) => {
+      assert.match(systemPrompt, /prompt-quality reviewer/);
+      assert.match(userMessage, /<raw_prompt>\ndraft\n<\/raw_prompt>/);
+      return { text: '{"score": 91}' };
+    }
+  });
+  const verdict = await judgeWithNano('draft', 'Act as an expert.');
+  assert.deepEqual(verdict, { score: 91 });
 });
 
 test('judgeWithNano degrades to null on any failure, and always destroys the session', async () => {

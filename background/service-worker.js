@@ -7,7 +7,7 @@
  */
 
 import {
-  optimizePrompt, refinePrompt, clarifyPrompt, setNanoBackend, CancelledError
+  optimizePrompt, refinePrompt, clarifyPrompt, setNanoBackend, setNanoJudgeBackend, CancelledError
 } from '../shared/optimizer-engine.js';
 import { nanoBridge } from './nano-bridge.js';
 import { isEngine } from '../shared/engines.js';
@@ -19,8 +19,11 @@ import { saveToLibrary, getLibrary, collectLabels } from '../shared/library.js';
 
 const MENU_ID = 'promptcraft-optimize-selection';
 
-// The Prompt API lives in documents, not workers: run Nano offscreen.
-if (chrome.offscreen) setNanoBackend(nanoBridge);
+// The Prompt API lives in documents, not workers: run Nano (and judge) offscreen.
+if (chrome.offscreen) {
+  setNanoBackend(nanoBridge);
+  setNanoJudgeBackend(nanoBridge);
+}
 
 const SITE_SCRIPT_PREFIX = 'promptcraft-site-';
 
@@ -227,7 +230,7 @@ async function disableSite(rawOrigin) {
  * `io` carries { signal, onToken, onStart } when the caller streams.
  */
 async function runRequest(payload = {}, sender, io = {}) {
-  const { action = 'optimize', text, frameworkId, engine, host, context, variantCount, kind, previous } = payload;
+  const { action = 'optimize', text, frameworkId, engine, host, context, variantCount, kind, previous, instruction } = payload;
   /* The host tunes the rewrite for the target model. Prefer the sender tab's
      own URL (content script) — a popup can only claim a host, the active tab
      is what it actually shows. */
@@ -239,7 +242,7 @@ async function runRequest(payload = {}, sender, io = {}) {
   if (action === 'clarify') return clarifyPrompt(text, { engine, signal: io.signal });
 
   const result = action === 'refine'
-    ? await refinePrompt(text, { ...common, kind, previous })
+    ? await refinePrompt(text, { ...common, kind, previous, instruction })
     : await optimizePrompt(text, { ...common, context, variantCount });
 
   await addHistoryEntry({
@@ -338,8 +341,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           if (!isEngine(engineId)) {
             throw new Error(`Unknown engine "${engineId}".`);
           }
-          const saved = await saveSettings({ preferredEngine: engineId });
+          const patch = engineId === 'omniroute'
+            ? { preferredEngine: engineId, omnirouteEnabled: true }
+            : { preferredEngine: engineId };
+          const saved = await saveSettings(patch);
           sendResponse({ success: true, preferredEngine: saved.preferredEngine });
+          break;
+        }
+
+        case 'OPEN_OPTIONS': {
+          await chrome.runtime.openOptionsPage();
+          sendResponse({ success: true });
           break;
         }
 

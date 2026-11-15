@@ -25,14 +25,48 @@ export function detectSecrets(text) {
 
 const CLOUD_ENGINES = ['gemini', 'openai', 'anthropic', 'openrouter'];
 
+/** Whether an endpoint targets the user's own machine. */
+export function isLocalEndpoint(rawUrl) {
+  const value = String(rawUrl ?? '').trim();
+  if (!value) return true;
+  try {
+    const host = new URL(value).hostname.toLowerCase();
+    return host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]';
+  } catch {
+    return false;
+  }
+}
+
+function hasCloudKey(settings = {}) {
+  return CLOUD_ENGINES.some(id => String(settings[`${id}ApiKey`] || '').trim());
+}
+
+function isOmnirouteRemote(settings = {}) {
+  const active = Boolean(
+    settings.omnirouteEnabled ||
+    String(settings.omnirouteApiKey || '').trim() ||
+    settings.preferredEngine === 'omniroute'
+  );
+  if (!active) return false;
+  return !isLocalEndpoint(settings.omnirouteBaseUrl || 'http://localhost:20128/v1');
+}
+
 /**
- * Whether a run with `engine` may send the draft to a cloud provider. Nano is
- * on-device, but it falls back to any provider with a saved key.
+ * Whether a run with `engine` may send the draft to a remote/cloud provider.
+ * Nano stays local unless fallback is enabled and a remote route exists.
  */
 export function mayLeaveDevice(engine, settings = {}) {
   if (engine === 'offline') return false;
-  if (engine !== 'nano') return true;
-  return CLOUD_ENGINES.some(id => String(settings[`${id}ApiKey`] || '').trim());
+  if (engine === 'nano') {
+    if (settings.allowCloudFallback === false) return false;
+    return Boolean(hasCloudKey(settings) || isOmnirouteRemote(settings));
+  }
+  if (engine === 'omniroute') {
+    if (!isLocalEndpoint(settings.omnirouteBaseUrl || 'http://localhost:20128/v1')) return true;
+    if (settings.allowCloudFallback === false) return false;
+    return hasCloudKey(settings);
+  }
+  return true;
 }
 
 /** One sentence for the warning, or '' when there is nothing to warn about. */

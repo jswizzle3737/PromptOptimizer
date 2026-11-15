@@ -7,11 +7,49 @@
  * 4. Options UI rendering & settings persistence
  */
 
-const { spawn } = require('child_process');
+const { spawn, execFileSync } = require('child_process');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
-const BROWSER_PATH = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
+function findBrowserExecutable() {
+  if (process.env.BROWSER_PATH && fs.existsSync(process.env.BROWSER_PATH)) {
+    return process.env.BROWSER_PATH;
+  }
+  const candidatesByPlatform = {
+    linux: [
+      '/usr/bin/chromium',
+      '/usr/bin/chromium-browser',
+      '/snap/bin/chromium',
+      '/usr/bin/google-chrome'
+    ],
+    darwin: [
+      '/Applications/Chromium.app/Contents/MacOS/Chromium',
+      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+      '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge'
+    ],
+    win32: [
+      'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+      'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+      'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+      'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe'
+    ]
+  };
+  for (const p of candidatesByPlatform[process.platform] || []) {
+    if (fs.existsSync(p)) return p;
+  }
+  if (process.platform !== 'win32') {
+    for (const cmd of ['chromium', 'chromium-browser', 'google-chrome']) {
+      try {
+        const resolved = execFileSync('which', [cmd], { encoding: 'utf8' }).trim();
+        if (resolved && fs.existsSync(resolved)) return resolved;
+      } catch {}
+    }
+  }
+  throw new Error(`No supported browser binary found for "${process.platform}". Set BROWSER_PATH.`);
+}
+
+const BROWSER_PATH = findBrowserExecutable();
 const EXT_PATH = path.resolve(__dirname);
 /* Design count comes from the THEMES list, so adding a design never breaks this test. */
 const DESIGN_COUNT = (fs.readFileSync(path.join(__dirname, 'shared/theme-picker.js'), 'utf8').match(/^    id: '/gm) || []).length;
@@ -37,7 +75,7 @@ const engineMenuVisibility = (rootExpr, slotSel) => `(async () => {
   await new Promise(r => setTimeout(r, 200));
   return { total: opts.length, visible };
 })()`;
-const TEMP_USER_DATA = path.join(process.env.TEMP || 'C:\\Temp', `chrome-test-profile-${Date.now()}`);
+const TEMP_USER_DATA = path.join(os.tmpdir(), `chrome-test-profile-${Date.now()}`);
 
 const DEBUG_PORT = 9222;
 
@@ -157,11 +195,15 @@ async function runTests() {
     '--no-first-run',
     '--no-default-browser-check',
     '--headless=new',
+    ...(process.platform === 'linux' ? ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu'] : []),
     'about:blank'
   ];
 
   console.log('\n[1/5] Launching Chromium in test mode...');
-  const browserProcess = spawn(BROWSER_PATH, browserArgs, { stdio: 'ignore' });
+  const browserProcess = spawn(BROWSER_PATH, browserArgs, {
+    stdio: 'ignore',
+    detached: process.platform !== 'win32'
+  });
 
   // Wait for CDP port to open
   let connected = false;
@@ -381,10 +423,12 @@ async function runTests() {
           chrome.storage.local.get('promptcraft_settings', res => {
             const settings = res.promptcraft_settings || {};
             resolve({
-              anyKey: ['openrouter', 'gemini', 'openai', 'anthropic']
+              anyKey: ['openrouter', 'gemini', 'openai', 'anthropic', 'omniroute']
                 .some(p => Boolean(settings[p + 'ApiKey'])),
               engine: settings.preferredEngine,
-              schemaVersion: settings.schemaVersion
+              schemaVersion: settings.schemaVersion,
+              allowCloudFallback: settings.allowCloudFallback,
+              omnirouteEnabled: settings.omnirouteEnabled
             });
           });
         })
@@ -395,7 +439,12 @@ async function runTests() {
     if (orKeyCheck.result.value.anyKey) {
       throw new Error('A fresh install must not ship with any API key.');
     }
-    if (orKeyCheck.result.value.engine !== 'nano' || orKeyCheck.result.value.schemaVersion !== 3) {
+    if (
+      orKeyCheck.result.value.engine !== 'nano' ||
+      orKeyCheck.result.value.schemaVersion !== 4 ||
+      orKeyCheck.result.value.allowCloudFallback !== true ||
+      orKeyCheck.result.value.omnirouteEnabled !== false
+    ) {
       throw new Error(`Unexpected fresh-install settings: ${JSON.stringify(orKeyCheck.result.value)}`);
     }
 
@@ -498,19 +547,66 @@ async function runTests() {
       await popupClient.send('Emulation.setDeviceMetricsOverride', { width: 440, height, deviceScaleFactor: 1, mobile: false });
       await sleep(250);
       const v = (await popupClient.send('Runtime.evaluate', { expression: engineMenuVisibility('document', '#engine-slot'), awaitPromise: true, returnByValue: true })).result.value;
-      if (v.error || v.visible.length !== v.total || v.total < 6) throw new Error(`Popup engine picker at ${height}px hides engines: ${JSON.stringify(v)}`);
+      if (v.error || v.visible.length !== v.total || v.total !== 7 || !v.visible.includes('omniroute')) {
+        throw new Error(`Popup engine picker at ${height}px hides engines or missing omniroute: ${JSON.stringify(v)}`);
+      }
     }
-    console.log('✓ Popup engine picker shows all engines');
+    console.log('✓ Popup engine picker shows all 7 engines including omniroute');
     await popupClient.send('Emulation.clearDeviceMetricsOverride');
 
-    // Test Framework switching in Popup (Switch to RTF)
-    console.log('\n[4/5] Testing Framework switching (RTF Framework)...');
-    await popupClient.send('Runtime.evaluate', {
-      expression: `
-        document.querySelector('.pc-segmented__item[data-framework="rtf"]').click();
+    // Test Framework switching in Popup (Switch to RTF without auto-running, then roving arrows, then Optimize)
+    console.log('\n[4/5] Testing Framework switching (no auto-run + roving keyboard + RTF)...');
+    const tabSwitchRes = await popupClient.send('Runtime.evaluate', {
+      awaitPromise: true,
+      returnByValue: true,
+      expression: `(async () => {
+        const tabsEl = document.getElementById('framework-tabs');
+        const rtf = tabsEl.querySelector('.pc-segmented__item[data-framework="rtf"]');
+        const smart = tabsEl.querySelector('.pc-segmented__item[data-framework="smart-expand"]');
+        const beforeText = document.getElementById('result-text').textContent;
+        rtf.click();
+        await new Promise(r => setTimeout(r, 250));
+        const afterClick = {
+          rtfSelected: rtf.getAttribute('aria-selected'),
+          rtfTabindex: rtf.getAttribute('tabindex'),
+          smartSelected: smart.getAttribute('aria-selected'),
+          smartTabindex: smart.getAttribute('tabindex'),
+          status: document.getElementById('status-message').textContent,
+          unchangedResult: document.getElementById('result-text').textContent === beforeText
+        };
+        rtf.focus();
+        tabsEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+        await new Promise(r => setTimeout(r, 50));
+        const afterRight = {
+          focusedFramework: document.activeElement?.dataset?.framework || '',
+          tabindex: document.activeElement?.getAttribute?.('tabindex') || ''
+        };
+        tabsEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }));
+        await new Promise(r => setTimeout(r, 50));
+        const afterLeft = {
+          focusedFramework: document.activeElement?.dataset?.framework || '',
+          tabindex: document.activeElement?.getAttribute?.('tabindex') || ''
+        };
         document.getElementById('optimize-btn').click();
-      `
+        return { afterClick, afterRight, afterLeft };
+      })()`
     });
+    const tsPopup = tabSwitchRes.result.value;
+    if (
+      tsPopup.afterClick.rtfSelected !== 'true' ||
+      tsPopup.afterClick.rtfTabindex !== '0' ||
+      tsPopup.afterClick.smartSelected !== 'false' ||
+      tsPopup.afterClick.smartTabindex !== '-1' ||
+      !/Switched to RTF/.test(tsPopup.afterClick.status) ||
+      !tsPopup.afterClick.unchangedResult
+    ) {
+      throw new Error(`Popup tab switch behavior incorrect: ${JSON.stringify(tsPopup)}`);
+    }
+    if (tsPopup.afterRight.focusedFramework === 'rtf' || tsPopup.afterRight.tabindex !== '0' || tsPopup.afterLeft.focusedFramework !== 'rtf') {
+      throw new Error(`Popup roving tabindex arrow navigation failed: ${JSON.stringify(tsPopup)}`);
+    }
+    console.log('✓ Popup framework tab switch updates selection/roving tabindex and hints without auto-running');
+
     for (let wait = 0; wait < 40; wait++) {
       await sleep(250);
       const st = await popupClient.send('Runtime.evaluate', {
@@ -528,6 +624,51 @@ async function runTests() {
     } else {
       console.warn('⚠️ RTF text did not contain standard headings:', rtfText);
     }
+
+    // Inline output editing + Undo in Popup
+    console.log('→ Testing Popup inline output editing and Undo...');
+    const editUndoRes = await popupClient.send('Runtime.evaluate', {
+      awaitPromise: true,
+      returnByValue: true,
+      expression: `(async () => {
+        const resEl = document.getElementById('result-text');
+        const orig = resEl.textContent;
+        const customFormExists = Boolean(document.querySelector('.pc-assist__custom .pc-assist__custom-input'));
+        const contentEditableAttr = resEl.getAttribute('contenteditable');
+        resEl.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, inputType: 'insertText', data: 'x' }));
+        resEl.textContent = 'Short manual edit without sections';
+        resEl.dispatchEvent(new Event('input', { bubbles: true }));
+        await new Promise(r => setTimeout(r, 150));
+        const editedStatus = document.getElementById('status-message').textContent;
+        const editedQuality = document.getElementById('quality-chip').textContent;
+        const undoBtn = document.querySelector('[data-act="undo"]');
+        const undoVisible = Boolean(undoBtn) && !undoBtn.hidden;
+        undoBtn?.click();
+        await new Promise(r => setTimeout(r, 150));
+        return {
+          customFormExists,
+          contentEditableAttr,
+          editedStatus,
+          editedQuality,
+          undoVisible,
+          revertedMatchesOriginal: resEl.textContent === orig,
+          revertedStatus: document.getElementById('status-message').textContent
+        };
+      })()`
+    });
+    const eu = editUndoRes.result.value;
+    if (
+      !eu.customFormExists ||
+      eu.contentEditableAttr !== 'plaintext-only' ||
+      eu.editedStatus !== 'Edited' ||
+      !eu.undoVisible ||
+      !eu.revertedMatchesOriginal ||
+      eu.revertedStatus !== 'Reverted change'
+    ) {
+      throw new Error(`Popup inline edit / Undo failed: ${JSON.stringify(eu)}`);
+    }
+    console.log('✓ Popup inline output editing updates status/quality and Undo reverts cleanly');
+
 
     // Save the result on screen to the library, with a name and labels.
     console.log('→ Testing Save to library from the Popup...');
@@ -744,6 +885,33 @@ async function runTests() {
       })()`
     });
 
+    // Clear draft & reset workspace
+    const clearCheck = await popupClient.send('Runtime.evaluate', {
+      awaitPromise: true,
+      returnByValue: true,
+      expression: `(async () => {
+        const clearBtn = document.getElementById('clear-draft-btn');
+        const visibleBefore = !clearBtn.hidden;
+        clearBtn.click();
+        await new Promise(r => setTimeout(r, 150));
+        const sess = await chrome.storage.session?.get?.('promptcraft_popup_session');
+        return {
+          visibleBefore,
+          visibleAfter: !clearBtn.hidden,
+          rawAfter: document.getElementById('raw-prompt').value,
+          charCount: document.getElementById('char-counter').textContent,
+          resultHidden: document.getElementById('result-text').hidden,
+          placeholderHidden: document.getElementById('result-placeholder').hidden,
+          sessionCleared: !sess || !sess.promptcraft_popup_session
+        };
+      })()`
+    });
+    const cc = clearCheck.result.value;
+    if (!cc.visibleBefore || cc.visibleAfter || cc.rawAfter !== '' || cc.charCount !== '0' || !cc.resultHidden || cc.placeholderHidden || !cc.sessionCleared) {
+      throw new Error(`Popup clear draft failed: ${JSON.stringify(cc)}`);
+    }
+    console.log('✓ Popup Clear draft resets input, result, undo, and session state');
+
     popupClient.close();
 
     // 5. Test Options Page
@@ -814,36 +982,121 @@ async function runTests() {
         navItems: document.querySelectorAll('.pc-nav__item').length,
         themePicker: Boolean(document.querySelector('#theme-picker-slot .pc-select')),
         engineSelect: Boolean(document.querySelector('#preferred-engine-slot .pc-select')),
-        frameworkCards: document.querySelectorAll('.pc-framework').length
+        frameworkCards: document.querySelectorAll('.pc-framework').length,
+        omniSection: Boolean(document.getElementById('omniroute-base-url') && document.getElementById('omniroute-enabled') && document.getElementById('omniroute-model')),
+        openrouterFilter: Boolean(document.getElementById('openrouter-all-models-toggle') && document.getElementById('openrouter-model-filter')),
+        historyNav: Boolean(document.getElementById('history-nav-link'))
       }))()`,
       returnByValue: true
     });
     console.log('✓ Options console structure:', shellCheck.result.value);
-    if (shellCheck.result.value.sections < 5 || !shellCheck.result.value.themePicker) {
-      throw new Error('Options console did not render the design-system structure.');
+    if (
+      shellCheck.result.value.sections !== 7 ||
+      shellCheck.result.value.navItems !== 7 ||
+      !shellCheck.result.value.themePicker ||
+      !shellCheck.result.value.omniSection ||
+      !shellCheck.result.value.openrouterFilter ||
+      !shellCheck.result.value.historyNav
+    ) {
+      throw new Error('Options console did not render all expected v4 sections/controls: ' + JSON.stringify(shellCheck.result.value));
     }
 
-    // Test saving custom instructions
-    await optionsClient.send('Runtime.evaluate', {
-      expression: `
-        document.getElementById('custom-system-prompt').value = 'Always enforce clean architecture and unit tests.';
-        document.getElementById('save-btn').click();
-      `
-    });
-    await sleep(500);
-
-    // Verify saved in chrome.storage.local
-    const storageCheck = await optionsClient.send('Runtime.evaluate', {
+    // Test dirty tracking, preset bindings, clamping, privacy toggle, and Ctrl+S saving
+    const saveFlowRes = await optionsClient.send('Runtime.evaluate', {
       awaitPromise: true,
-      expression: `
-        new Promise(resolve => {
-          chrome.storage.local.get('promptcraft_settings', res => {
-            resolve(res.promptcraft_settings?.customSystemPrompt);
-          });
-        })
-      `
+      returnByValue: true,
+      expression: `(async () => {
+        const wait = ms => new Promise(r => setTimeout(r, ms));
+        const $ = id => document.getElementById(id);
+        const initialClean = $('save-status-text').textContent === 'Saved locally' && !$('save-status').classList.contains('is-dirty');
+
+        // Dirty tracking + custom prompt
+        $('custom-system-prompt').value = 'Always enforce clean architecture and unit tests.';
+        $('custom-system-prompt').dispatchEvent(new Event('input', { bubbles: true }));
+
+        // Strict local Nano toggle + maxHistory clamping
+        $('allow-cloud-fallback').checked = false;
+        $('allow-cloud-fallback').dispatchEvent(new Event('change', { bubbles: true }));
+        $('max-history').value = '250';
+        $('max-history').dispatchEvent(new Event('change', { bubbles: true }));
+        const clampedHistoryInput = $('max-history').value;
+
+        // Provider preset bidirectional sync (Gemini & OmniRoute)
+        const omniPreset = document.querySelector('#omniroute-model-slot .pc-select');
+        omniPreset.querySelector('.pc-select__trigger').click();
+        await wait(60);
+        omniPreset.querySelector('.pc-select__option[data-value="auto/coding:free"]')?.click();
+        await wait(60);
+        const omniPresetSyncedInput = $('omniroute-model').value;
+        $('omniroute-model').value = 'custom-route-test';
+        $('omniroute-model').dispatchEvent(new Event('input', { bubbles: true }));
+        const omniCustomPresetVal = omniPreset.dataset.value;
+        $('omniroute-model').value = 'auto';
+        $('omniroute-model').dispatchEvent(new Event('input', { bubbles: true }));
+
+        const gemPreset = document.querySelector('#gemini-model-slot .pc-select');
+        gemPreset.querySelector('.pc-select__trigger').click();
+        await wait(60);
+        gemPreset.querySelector('.pc-select__option[data-value="gemini-2.5-pro"]')?.click();
+        await wait(60);
+
+        // OpenRouter filter test (does not mutate selection)
+        const filterInput = $('openrouter-model-filter');
+        filterInput.value = 'zzz-nonexistent';
+        filterInput.dispatchEvent(new Event('input', { bubbles: true }));
+        const orFilteredCount = document.querySelectorAll('#openrouter-model-slot .pc-select__option').length;
+        filterInput.value = '';
+        filterInput.dispatchEvent(new Event('input', { bubbles: true }));
+
+        const dirtyShown = $('save-status-text').textContent === 'Unsaved changes' && $('save-status').classList.contains('is-dirty');
+
+        // Save via Ctrl+S shortcut
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 's', ctrlKey: true, bubbles: true }));
+        await wait(500);
+        const savedCleanAfterCtrlS = $('save-status-text').textContent === 'Saved locally' && !$('save-status').classList.contains('is-dirty');
+
+        const afterFirstSave = await new Promise(r => chrome.storage.local.get('promptcraft_settings', x => r(x.promptcraft_settings)));
+
+        // Restore allowCloudFallback = true & maxHistoryItems = 20 via Save button
+        $('allow-cloud-fallback').checked = true;
+        $('allow-cloud-fallback').dispatchEvent(new Event('change', { bubbles: true }));
+        $('max-history').value = '20';
+        $('max-history').dispatchEvent(new Event('change', { bubbles: true }));
+        $('save-btn').click();
+        await wait(400);
+
+        return {
+          initialClean,
+          clampedHistoryInput,
+          omniPresetSyncedInput,
+          omniCustomPresetVal,
+          orFilteredCount,
+          dirtyShown,
+          savedCleanAfterCtrlS,
+          customPrompt: afterFirstSave.customSystemPrompt,
+          cloudFallbackSavedFalse: afterFirstSave.allowCloudFallback === false,
+          maxHistorySaved100: afterFirstSave.maxHistoryItems === 100,
+          geminiModelSaved: afterFirstSave.geminiModel
+        };
+      })()`
     });
-    console.log(`✓ Settings successfully persisted in chrome.storage: "${storageCheck.result.value}"`);
+    const sf = saveFlowRes.result.value;
+    if (
+      !sf.initialClean ||
+      sf.clampedHistoryInput !== '100' ||
+      sf.omniPresetSyncedInput !== 'auto/coding:free' ||
+      sf.omniCustomPresetVal !== '__custom__' ||
+      sf.orFilteredCount !== 1 ||
+      !sf.dirtyShown ||
+      !sf.savedCleanAfterCtrlS ||
+      sf.customPrompt !== 'Always enforce clean architecture and unit tests.' ||
+      !sf.cloudFallbackSavedFalse ||
+      !sf.maxHistorySaved100 ||
+      sf.geminiModelSaved !== 'gemini-2.5-pro'
+    ) {
+      throw new Error(`Options save/dirty/presets/clamping failed: ${JSON.stringify(sf)}`);
+    }
+    console.log(`✓ Options dirty tracking, Ctrl+S save, privacy toggle, clamping, and presets verified`);
 
     // Test Adding a New Custom Optimizer Framework
     console.log('\n→ Testing "Add New Optimizer Type" in Options...');
@@ -978,6 +1231,54 @@ async function runTests() {
     if (JSON.stringify(lr.afterDelete) !== JSON.stringify(['CSV parser script'])) throw new Error('Delete did not remove the prompt: ' + JSON.stringify(lr.afterDelete));
     console.log('✓ Library: list, add, label filter, search, edit, empty refusal and delete all behave');
 
+    // History section & Export buttons in Options
+    console.log('→ Testing History management and Export buttons in Options...');
+    const histExportRes = await optionsClient.send('Runtime.evaluate', {
+      awaitPromise: true,
+      returnByValue: true,
+      expression: `(async () => {
+        const wait = ms => new Promise(r => setTimeout(r, ms));
+        const rows = () => [...document.querySelectorAll('#history-options-list .pc-history-entry')];
+        const initialCount = rows().length;
+        const search = document.getElementById('history-search');
+        search.value = 'python';
+        search.dispatchEvent(new Event('input', { bubbles: true }));
+        await wait(120);
+        const filteredCount = rows().length;
+        search.value = 'zzz-no-history-match';
+        search.dispatchEvent(new Event('input', { bubbles: true }));
+        await wait(120);
+        const emptyTitle = document.querySelector('#history-options-list .pc-library__empty strong')?.textContent || '';
+        search.value = '';
+        search.dispatchEvent(new Event('input', { bubbles: true }));
+        await wait(120);
+
+        rows()[0]?.querySelector('[data-action="delete"]')?.click();
+        await wait(350);
+        const afterDeleteCount = rows().length;
+
+        document.getElementById('export-frameworks-btn').click();
+        await wait(150);
+        const fwExportToast = document.getElementById('toast').textContent;
+        document.getElementById('export-library-btn').click();
+        await wait(150);
+        const libExportToast = document.getElementById('toast').textContent;
+        return { initialCount, filteredCount, emptyTitle, afterDeleteCount, fwExportToast, libExportToast };
+      })()`
+    });
+    const he = histExportRes.result.value;
+    if (
+      he.initialCount < 1 ||
+      he.filteredCount < 1 ||
+      he.emptyTitle !== 'No matching history entries' ||
+      he.afterDeleteCount !== he.initialCount - 1 ||
+      !/Exported \d+ optimizer/.test(he.fwExportToast) ||
+      !/Exported \d+ saved prompt/.test(he.libExportToast)
+    ) {
+      throw new Error(`Options history / export check failed: ${JSON.stringify(he)}`);
+    }
+    console.log('✓ Options history list/search/delete and export buttons verified');
+
     optionsClient.close();
 
     // 6. Test Content Script & Floating In-Page Widget
@@ -991,8 +1292,9 @@ async function runTests() {
         <head><title>Mock AI Chat</title></head>
         <body style="padding: 50px;">
           <h1>Mock AI Chat Interface</h1>
-          <div style="margin-top: 100px;">
+          <div id="chat-scroller" style="margin-top: 60px; height: 220px; overflow-y: auto; border: 1px solid #888; padding: 16px;">
             <textarea id="prompt-textarea" style="width: 400px; height: 100px;" placeholder="Message ChatGPT..."></textarea>
+            <div style="height: 600px;">Spacer content</div>
           </div>
           <div style="margin-top: 40px;">
             <input id="login-password" type="password" value="hunter2-do-not-read">
@@ -1073,6 +1375,27 @@ async function runTests() {
       `);
       console.log(`✓ Floating Trigger Visible: display="${pillCheck.result.value.display}", text="${pillCheck.result.value.text}"`);
 
+      // Capture-phase scroll listener must hide the pill when textarea scrolls out of view
+      const scrollPillCheck = await pageClient.send('Runtime.evaluate', {
+        awaitPromise: true,
+        returnByValue: true,
+        expression: `(async () => {
+          const scroller = document.getElementById('chat-scroller');
+          const pill = document.getElementById('promptcraft-root-host').shadowRoot.querySelector('.pc-trigger-pill');
+          scroller.scrollTop = 450;
+          await new Promise(r => setTimeout(r, 250));
+          const whenScrolledOut = pill.style.display;
+          scroller.scrollTop = 0;
+          await new Promise(r => setTimeout(r, 250));
+          const whenScrolledBack = pill.style.display;
+          return { whenScrolledOut, whenScrolledBack };
+        })()`
+      });
+      if (scrollPillCheck.result.value.whenScrolledOut !== 'none' || scrollPillCheck.result.value.whenScrolledBack !== 'flex') {
+        throw new Error(`Pill did not hide/restore on container scroll: ${JSON.stringify(scrollPillCheck.result.value)}`);
+      }
+      console.log('✓ Floating pill hides when target scrolls offscreen and returns on scroll back');
+
       // The pill must follow the chat box, never a credential field.
       const sensitiveCheck = await pageClient.send('Runtime.evaluate', {
         awaitPromise: true,
@@ -1141,7 +1464,9 @@ async function runTests() {
         await pageClient.send('Emulation.setDeviceMetricsOverride', { width: 1280, height, deviceScaleFactor: 1, mobile: false });
         await sleep(250);
         const v = (await evalInIsolated(engineMenuVisibility("document.getElementById('promptcraft-root-host').shadowRoot", '#pc-engine-slot'), true)).result.value;
-        if (v.error || v.visible.length !== v.total || v.total < 6) throw new Error(`In-page engine picker at ${height}px hides engines: ${JSON.stringify(v)}`);
+        if (v.error || v.visible.length !== v.total || v.total !== 7 || !v.visible.includes('omniroute')) {
+          throw new Error(`In-page engine picker at ${height}px hides engines or missing omniroute: ${JSON.stringify(v)}`);
+        }
       }
       await pageClient.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
       console.log('✓ In-page engine picker shows all engines at 900px and 560px tall');
@@ -1190,14 +1515,23 @@ async function runTests() {
         (() => {
           const shadow = document.getElementById('promptcraft-root-host').shadowRoot;
           const customTab = Array.from(shadow.querySelectorAll('.pc-segmented__item')).find(t => t.textContent.includes('Security Auditor'));
-          if (customTab) {
-            customTab.click();
-            return { found: true, name: customTab.textContent.trim() };
-          }
-          return { found: false };
+          if (!customTab) return { found: false };
+          customTab.click();
+          return {
+            found: true,
+            name: customTab.textContent.trim(),
+            selected: customTab.getAttribute('aria-selected'),
+            tabindex: customTab.getAttribute('tabindex'),
+            status: shadow.querySelector('#pc-footer-status')?.textContent || '',
+            autoOptimized: !shadow.querySelector('#pc-result-text')?.hidden
+          };
         })()
       `);
       console.log('✓ In-Page Tab Switch:', tabSwitched.result.value);
+      const tsv = tabSwitched.result.value;
+      if (!tsv.found || tsv.selected !== 'true' || tsv.tabindex !== '0' || tsv.autoOptimized) {
+        throw new Error(`In-page tab switch assertion failed: ${JSON.stringify(tsv)}`);
+      }
 
       // In-page design picker: the modal header carries the same compact menu.
       console.log('→ Testing the design picker in the In-Page Modal...');
@@ -1311,6 +1645,50 @@ async function runTests() {
           `placeholder=${JSON.stringify((lastState?.placeholder || '').slice(0, 300))}`
         );
       }
+
+      // Test in-page inline output editing, Undo revert, and custom refine bar state
+      console.log('→ Testing In-Page Modal inline editing and Undo...');
+      const inPageEditUndo = await evalInIsolated(`
+        (async () => {
+          const shadow = document.getElementById('promptcraft-root-host').shadowRoot;
+          const resEl = shadow.querySelector('#pc-result-text');
+          const orig = resEl.textContent;
+          const customForm = shadow.querySelector('.pc-assist__custom');
+          const customHiddenForOffline = customForm ? customForm.hidden : false;
+          const ce = resEl.getAttribute('contenteditable');
+          resEl.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, inputType: 'insertText', data: 'x' }));
+          resEl.textContent = 'Inline shadow DOM manual edit';
+          resEl.dispatchEvent(new Event('input', { bubbles: true }));
+          await new Promise(r => setTimeout(r, 150));
+          const editedStatus = shadow.querySelector('#pc-footer-status')?.textContent || '';
+          const undoBtn = shadow.querySelector('[data-act="undo"]');
+          const undoVisible = Boolean(undoBtn) && !undoBtn.hidden;
+          undoBtn?.click();
+          await new Promise(r => setTimeout(r, 150));
+          return {
+            customExists: Boolean(customForm),
+            customHiddenForOffline,
+            ce,
+            editedStatus,
+            undoVisible,
+            revertedMatchesOrig: resEl.textContent === orig,
+            revertedStatus: shadow.querySelector('#pc-footer-status')?.textContent || ''
+          };
+        })()
+      `, true);
+      const ipe = inPageEditUndo.result.value;
+      if (
+        !ipe.customExists ||
+        !ipe.customHiddenForOffline ||
+        ipe.ce !== 'plaintext-only' ||
+        ipe.editedStatus !== 'Edited' ||
+        !ipe.undoVisible ||
+        !ipe.revertedMatchesOrig ||
+        ipe.revertedStatus !== 'Reverted change'
+      ) {
+        throw new Error(`In-page inline edit / Undo failed: ${JSON.stringify(ipe)}`);
+      }
+      console.log('✓ In-page modal inline editing and Undo revert verified');
 
       // Save the in-page result to the library; it goes through the service worker.
       console.log('→ Testing Save to library from the In-Page Modal...');
@@ -1441,16 +1819,16 @@ async function runTests() {
     console.log('\n🎉 ALL 6 AUTOMATED VERIFICATION TESTS PASSED SUCCESSFULLY! 🎉');
   } finally {
     /* Tear down only the browser tree we spawned.
-       `taskkill /T` is scoped to our PID and its descendants, so it cannot reach
-       a real Edge window the developer has open — a broad `taskkill /IM msedge.exe`
-       would. SIGTERM alone orphans Edge's child processes (zygote/GPU/renderers),
-       which then linger and hold the debug port, so the tree kill is required. */
+       `taskkill /T` on Windows and `-pid` group kill on POSIX prevent orphaned
+       child processes (zygote/GPU/renderers) from lingering on the debug port. */
     const pid = browserProcess.pid;
     if (pid) {
-      try {
-        spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' });
-      } catch {
-        try { browserProcess.kill('SIGKILL'); } catch {}
+      if (process.platform === 'win32') {
+        try { spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' }); } catch {}
+      } else {
+        try { process.kill(-pid, 'SIGTERM'); } catch {}
+        await sleep(350);
+        try { process.kill(-pid, 'SIGKILL'); } catch {}
       }
     }
     try { browserProcess.kill('SIGKILL'); } catch {}

@@ -26,9 +26,9 @@
     </div>
 
     <div class="pc-appbar__actions">
-      <span class="pc-appbar__status">
-        <span class="pc-status-dot pc-status-dot--success"></span>
-        <span>Saved locally</span>
+      <span class="pc-appbar__status" id="save-status">
+        <span class="pc-status-dot pc-status-dot--success" id="save-status-dot"></span>
+        <span id="save-status-text">Saved locally</span>
       </span>
       <button type="button" id="save-btn" class="pc-btn pc-btn--primary pc-btn--md">
         <span data-icon="save" data-icon-size="14"></span>
@@ -60,6 +60,9 @@
         </a>
         <a href="#sec-library" class="pc-nav__item">
           <span data-icon="bookmark"></span><span>Library</span>
+        </a>
+        <a href="#sec-history" class="pc-nav__item" id="history-nav-link">
+          <span data-icon="clock"></span><span>History</span>
         </a>
       </nav>
 
@@ -105,7 +108,7 @@
             <div class="pc-field">
               <label class="pc-field__label" id="engine-label">Default engine</label>
               <div id="preferred-engine-slot"></div>
-              <span class="pc-field__hint">Chrome Nano and Offline need no key. Cloud engines use the keys you add below.</span>
+              <span class="pc-field__hint">Chrome Nano, local OmniRoute, and Offline need no cloud API key. Cloud engines use the keys you add below.</span>
             </div>
 
             <div class="pc-field">
@@ -117,11 +120,29 @@
 
           <hr class="pc-divider">
 
+          <div class="pc-field">
+            <span class="pc-field__label">Privacy &amp; cloud fallback</span>
+            <label class="pc-switch">
+              <input type="checkbox" id="allow-cloud-fallback">
+              <span class="pc-switch__track"><span class="pc-switch__thumb"></span></span>
+              <span class="pc-switch__label">Allow cloud fallback when Chrome Nano is unavailable or errors</span>
+            </label>
+            <span class="pc-field__hint">Turn this off to keep Chrome Nano strictly on-device and offline without falling back to saved cloud keys.</span>
+          </div>
+
+          <hr class="pc-divider">
+
           <div class="pc-callout pc-callout--warning" id="nano-status-banner">
             <span class="pc-callout__icon" data-icon="cpu" data-icon-size="15"></span>
-            <span>
+            <span class="pc-nano-body">
               <span class="pc-callout__title">Chrome built-in Prompt API</span>
               <span id="nano-status-text">Checking status…</span>
+              <div class="pc-nano-actions" id="nano-actions" hidden>
+                <button type="button" class="pc-btn pc-btn--secondary pc-btn--sm" id="nano-download-btn">
+                  <span data-icon="cpu" data-icon-size="13"></span>
+                  <span>Download on-device model</span>
+                </button>
+              </div>
               <span id="nano-instructions" class="pc-nano-help" hidden>
                 <ol>
                   <li>Open <code>chrome://flags/#prompt-api-for-gemini-nano</code> → <strong>Enabled</strong>.</li>
@@ -138,7 +159,7 @@
       <section class="pc-section" id="sec-keys">
         <header class="pc-section__head">
           <h2>API keys</h2>
-          <p>Bring your own key for any provider. Keys are stored locally and sent only to the provider they belong to.</p>
+          <p>Bring your own key or connect a local gateway. Credentials stay in local extension storage and go only to the chosen endpoint.</p>
         </header>
 
         <div class="pc-card">
@@ -147,6 +168,11 @@
               <span class="pc-keyrow__title">
                 <span data-icon="branch" data-icon-size="14"></span> OpenRouter
               </span>
+              <label class="pc-switch pc-switch--compact">
+                <input type="checkbox" id="openrouter-all-models-toggle">
+                <span class="pc-switch__track"><span class="pc-switch__thumb"></span></span>
+                <span class="pc-switch__label">All models</span>
+              </label>
             </div>
             <div class="pc-field">
               <label class="pc-field__label" for="openrouter-api-key">API key</label>
@@ -155,10 +181,15 @@
                 <button type="button" class="pc-btn pc-btn--secondary pc-btn--sm" data-api="openrouter">Test</button>
               </div>
             </div>
+            <div class="pc-searchbox pc-searchbox--tight">
+              <span class="pc-searchbox__icon" data-icon="search" data-icon-size="14"></span>
+              <input type="search" id="openrouter-model-filter" class="pc-input"
+                     placeholder="Filter OpenRouter models (e.g. llama, claude, qwen)…" aria-label="Filter OpenRouter models" autocomplete="off">
+            </div>
             <div class="pc-grid-2">
               <div class="pc-field">
                 <div class="pc-field__row">
-                  <label class="pc-field__label" for="openrouter-model-select">Free model</label>
+                  <label class="pc-field__label" id="openrouter-model-select-label">Catalog model</label>
                   <button type="button" id="fetch-openrouter-free-models-btn" class="pc-linkbtn">
                     <span data-icon="refresh" data-icon-size="12"></span> Fetch live models
                   </button>
@@ -177,19 +208,67 @@
           <div class="pc-keyrow">
             <div class="pc-keyrow__head">
               <span class="pc-keyrow__title">
+                <span data-icon="branch" data-icon-size="14"></span> OmniRoute Gateway
+              </span>
+              <label class="pc-switch pc-switch--compact">
+                <input type="checkbox" id="omniroute-enabled">
+                <span class="pc-switch__track"><span class="pc-switch__thumb"></span></span>
+                <span class="pc-switch__label">Enable fallback</span>
+              </label>
+            </div>
+            <div class="pc-grid-2">
+              <div class="pc-field">
+                <label class="pc-field__label" for="omniroute-base-url">Base URL</label>
+                <input type="url" id="omniroute-base-url" class="pc-input pc-input--mono" placeholder="http://localhost:20128/v1" autocomplete="off">
+              </div>
+              <div class="pc-field">
+                <label class="pc-field__label" for="omniroute-api-key">API key <span class="pc-field__hint-inline">optional for local</span></label>
+                <div class="pc-input-group">
+                  <input type="password" id="omniroute-api-key" class="pc-input pc-input--mono" placeholder="Optional Bearer key" autocomplete="off">
+                  <button type="button" class="pc-btn pc-btn--secondary pc-btn--sm" data-api="omniroute">Test</button>
+                </div>
+              </div>
+            </div>
+            <div class="pc-grid-2">
+              <div class="pc-field">
+                <div class="pc-field__row">
+                  <label class="pc-field__label" id="omniroute-preset-label">Route preset</label>
+                  <button type="button" id="fetch-omniroute-models-btn" class="pc-linkbtn">
+                    <span data-icon="refresh" data-icon-size="12"></span> Fetch live routes
+                  </button>
+                </div>
+                <div id="omniroute-model-slot"></div>
+              </div>
+              <div class="pc-field">
+                <label class="pc-field__label" for="omniroute-model">Model / combo ID</label>
+                <input type="text" id="omniroute-model" class="pc-input pc-input--mono" placeholder="auto">
+              </div>
+            </div>
+            <span class="pc-field__hint">OpenAI-compatible router (defaults to keyless loopback <code>http://localhost:20128/v1</code>).</span>
+          </div>
+
+          <hr class="pc-divider">
+
+          <div class="pc-keyrow">
+            <div class="pc-keyrow__head">
+              <span class="pc-keyrow__title">
                 <span data-icon="cloud" data-icon-size="14"></span> Google Gemini
               </span>
               <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener" class="pc-linkbtn">
                 Get key <span data-icon="external" data-icon-size="11"></span>
               </a>
             </div>
+            <div class="pc-field">
+              <label class="pc-field__label" for="gemini-api-key">API key</label>
+              <div class="pc-input-group">
+                <input type="password" id="gemini-api-key" class="pc-input pc-input--mono" placeholder="AIzaSy…" autocomplete="off">
+                <button type="button" class="pc-btn pc-btn--secondary pc-btn--sm" data-api="gemini">Test</button>
+              </div>
+            </div>
             <div class="pc-grid-2">
               <div class="pc-field">
-                <label class="pc-field__label" for="gemini-api-key">API key</label>
-                <div class="pc-input-group">
-                  <input type="password" id="gemini-api-key" class="pc-input pc-input--mono" placeholder="AIzaSy…" autocomplete="off">
-                  <button type="button" class="pc-btn pc-btn--secondary pc-btn--sm" data-api="gemini">Test</button>
-                </div>
+                <label class="pc-field__label" id="gemini-preset-label">Preset</label>
+                <div id="gemini-model-slot"></div>
               </div>
               <div class="pc-field">
                 <label class="pc-field__label" for="gemini-model">Model</label>
@@ -209,13 +288,17 @@
                 Get key <span data-icon="external" data-icon-size="11"></span>
               </a>
             </div>
+            <div class="pc-field">
+              <label class="pc-field__label" for="openai-api-key">API key</label>
+              <div class="pc-input-group">
+                <input type="password" id="openai-api-key" class="pc-input pc-input--mono" placeholder="sk-proj-…" autocomplete="off">
+                <button type="button" class="pc-btn pc-btn--secondary pc-btn--sm" data-api="openai">Test</button>
+              </div>
+            </div>
             <div class="pc-grid-2">
               <div class="pc-field">
-                <label class="pc-field__label" for="openai-api-key">API key</label>
-                <div class="pc-input-group">
-                  <input type="password" id="openai-api-key" class="pc-input pc-input--mono" placeholder="sk-proj-…" autocomplete="off">
-                  <button type="button" class="pc-btn pc-btn--secondary pc-btn--sm" data-api="openai">Test</button>
-                </div>
+                <label class="pc-field__label" id="openai-preset-label">Preset</label>
+                <div id="openai-model-slot"></div>
               </div>
               <div class="pc-field">
                 <label class="pc-field__label" for="openai-model">Model</label>
@@ -235,13 +318,17 @@
                 Get key <span data-icon="external" data-icon-size="11"></span>
               </a>
             </div>
+            <div class="pc-field">
+              <label class="pc-field__label" for="anthropic-api-key">API key</label>
+              <div class="pc-input-group">
+                <input type="password" id="anthropic-api-key" class="pc-input pc-input--mono" placeholder="sk-ant-…" autocomplete="off">
+                <button type="button" class="pc-btn pc-btn--secondary pc-btn--sm" data-api="anthropic">Test</button>
+              </div>
+            </div>
             <div class="pc-grid-2">
               <div class="pc-field">
-                <label class="pc-field__label" for="anthropic-api-key">API key</label>
-                <div class="pc-input-group">
-                  <input type="password" id="anthropic-api-key" class="pc-input pc-input--mono" placeholder="sk-ant-…" autocomplete="off">
-                  <button type="button" class="pc-btn pc-btn--secondary pc-btn--sm" data-api="anthropic">Test</button>
-                </div>
+                <label class="pc-field__label" id="anthropic-preset-label">Preset</label>
+                <div id="anthropic-model-slot"></div>
               </div>
               <div class="pc-field">
                 <label class="pc-field__label" for="anthropic-model">Model</label>
@@ -273,7 +360,7 @@
             <div class="pc-field">
               <label class="pc-field__label" for="max-history">History entries kept</label>
               <input type="number" id="max-history" class="pc-input" value="20" min="5" max="100">
-              <span class="pc-field__hint">Older entries are dropped automatically.</span>
+              <span class="pc-field__hint">Clamped between 5 and 100 entries; older entries are dropped automatically.</span>
             </div>
 
             <div class="pc-field">
@@ -304,6 +391,9 @@
               <p class="pc-card__desc">Each type defines how a raw prompt is rewritten and structured.</p>
             </div>
             <div class="pc-btnrow">
+              <button type="button" id="export-frameworks-btn" class="pc-btn pc-btn--secondary pc-btn--sm">Export</button>
+              <button type="button" id="import-frameworks-btn" class="pc-btn pc-btn--secondary pc-btn--sm">Import</button>
+              <input type="file" id="import-frameworks-file" accept=".json,application/json" hidden>
               <button type="button" id="reset-frameworks-btn" class="pc-btn pc-btn--secondary pc-btn--sm">
                 <span data-icon="reset" data-icon-size="13"></span> Reset
               </button>
@@ -333,6 +423,9 @@
               <p class="pc-card__desc" id="library-summary"></p>
             </div>
             <div class="pc-btnrow">
+              <button type="button" id="export-library-btn" class="pc-btn pc-btn--secondary pc-btn--sm">Export</button>
+              <button type="button" id="import-library-btn" class="pc-btn pc-btn--secondary pc-btn--sm">Import</button>
+              <input type="file" id="import-library-file" accept=".json,application/json" hidden>
               <button type="button" id="add-prompt-btn" class="pc-btn pc-btn--primary pc-btn--sm">
                 <span data-icon="plus" data-icon-size="13"></span> New prompt
               </button>
@@ -348,6 +441,38 @@
           <div class="pc-library__labels" id="library-labels" role="group" aria-label="Filter by label"></div>
 
           <div class="pc-library" id="library-list"></div>
+        </div>
+      </section>
+
+      <!-- History -->
+      <section class="pc-section" id="sec-history">
+        <header class="pc-section__head">
+          <h2>History</h2>
+          <p>Recent optimizations stored locally on this device.</p>
+        </header>
+
+        <div class="pc-card">
+          <div class="pc-card__header">
+            <div>
+              <span class="pc-card__title">
+                <span data-icon="clock" data-icon-size="15"></span> Recent optimizations
+              </span>
+              <p class="pc-card__desc" id="history-summary"></p>
+            </div>
+            <div class="pc-btnrow">
+              <button type="button" id="clear-history-options-btn" class="pc-btn pc-btn--secondary pc-btn--sm pc-btn--danger-text">
+                <span data-icon="trash" data-icon-size="13"></span> Clear all
+              </button>
+            </div>
+          </div>
+
+          <div class="pc-searchbox">
+            <span class="pc-searchbox__icon" data-icon="search" data-icon-size="14"></span>
+            <input type="search" id="history-search" class="pc-input"
+                   placeholder="Search history by draft, rewrite, framework or engine" aria-label="Search history" autocomplete="off">
+          </div>
+
+          <div class="pc-library" id="history-options-list"></div>
         </div>
       </section>
     </main>

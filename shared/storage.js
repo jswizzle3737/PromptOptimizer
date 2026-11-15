@@ -16,7 +16,35 @@ import { THEMES, DEFAULT_THEME, migrateTheme, LEGACY_THEME_IDS } from './theme-p
 export { THEMES, DEFAULT_THEME, migrateTheme, LEGACY_THEME_IDS, hasIcon };
 
 /** Bump when persisted shapes change. Read by `migrateSettings`. */
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
+
+export const MAX_HISTORY_MIN = 5;
+export const MAX_HISTORY_MAX = 100;
+
+export function clampMaxHistory(value, fallback = 20) {
+  const n = parseInt(value, 10);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(MAX_HISTORY_MIN, Math.min(MAX_HISTORY_MAX, n));
+}
+
+/**
+ * Normalise an OpenAI-compatible base URL (OmniRoute gateway).
+ * Strips trailing slashes and appends `/v1` only when no explicit path prefix
+ * is present, returning '' for empty or non-HTTP(S) input.
+ */
+export function normalizeBaseUrl(raw) {
+  const trimmed = String(raw ?? '').trim();
+  if (!trimmed) return '';
+  let url;
+  try {
+    url = new URL(trimmed);
+  } catch {
+    return '';
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return '';
+  const cleanPath = url.pathname.replace(/\/+$/, '');
+  return cleanPath ? `${url.origin}${cleanPath}` : `${url.origin}/v1`;
+}
 
 /**
  * Per-provider model defaults. The one place these live — the engine, the
@@ -29,7 +57,39 @@ export const PROVIDER_DEFAULTS = {
   gemini: { model: 'gemini-3.5-flash-lite' },
   openai: { model: 'gpt-4o-mini' },
   anthropic: { model: 'claude-sonnet-5-5' },
-  openrouter: { model: 'openrouter/free' }
+  openrouter: { model: 'openrouter/free' },
+  omniroute: { model: 'auto', baseUrl: 'http://localhost:20128/v1' }
+};
+
+/**
+ * Curated quick presets for provider pickers in Options. Users can still
+ * enter any custom model ID in the paired text field.
+ */
+export const PROVIDER_MODEL_PRESETS = {
+  omniroute: [
+    { id: 'auto', name: 'Auto Router (best available route)' },
+    { id: 'auto/coding:free', name: 'Auto Coding (free combo)' },
+    { id: 'auto/reasoning:free', name: 'Auto Reasoning (free combo)' }
+  ],
+  gemini: [
+    { id: 'gemini-3.5-flash-lite', name: 'Gemini 3.5 Flash-Lite (Default / Fast)' },
+    { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash' },
+    { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro' },
+    { id: 'gemini-2.5-flash-lite', name: 'Gemini 2.5 Flash-Lite' }
+  ],
+  openai: [
+    { id: 'gpt-4o-mini', name: 'GPT-4o mini (Default / Fast)' },
+    { id: 'gpt-4.1', name: 'GPT-4.1' },
+    { id: 'gpt-4.1-mini', name: 'GPT-4.1 mini' },
+    { id: 'gpt-5-mini', name: 'GPT-5 mini' },
+    { id: 'o4-mini', name: 'o4-mini (Reasoning)' }
+  ],
+  anthropic: [
+    { id: 'claude-sonnet-5-5', name: 'Claude Sonnet 5.5 (Default)' },
+    { id: 'claude-sonnet-4-5', name: 'Claude Sonnet 4.5' },
+    { id: 'claude-opus-4-1', name: 'Claude Opus 4.1' },
+    { id: 'claude-haiku-4-5', name: 'Claude Haiku 4.5' }
+  ]
 };
 
 /**
@@ -67,6 +127,7 @@ export const DEFAULT_SETTINGS = {
   preferredEngine: 'nano',
   preferredFramework: 'smart-expand',
   enableFloatingWidget: true,
+  allowCloudFallback: true,
   geminiApiKey: '',
   geminiModel: PROVIDER_DEFAULTS.gemini.model,
   openaiApiKey: '',
@@ -75,6 +136,10 @@ export const DEFAULT_SETTINGS = {
   anthropicModel: PROVIDER_DEFAULTS.anthropic.model,
   openrouterApiKey: '',
   openrouterModel: PROVIDER_DEFAULTS.openrouter.model,
+  omnirouteEnabled: false,
+  omnirouteBaseUrl: PROVIDER_DEFAULTS.omniroute.baseUrl,
+  omnirouteApiKey: '',
+  omnirouteModel: PROVIDER_DEFAULTS.omniroute.model,
   customSystemPrompt: '',
   showDiffView: true,
   /** How many alternative rewrites to produce per optimization: 1-3. */
@@ -126,6 +191,20 @@ export async function migrateSettings(stored, retiredKeyHashes = RETIRED_OPENROU
     if (retired.includes(merged[field])) merged[field] = PROVIDER_DEFAULTS[providerKey[field]].model;
   }
 
+  // v3 → v4: OmniRoute gateway configuration, cloud fallback privacy control,
+  // and clamped history capacity.
+  merged.allowCloudFallback = merged.allowCloudFallback !== false;
+  merged.omnirouteApiKey = typeof merged.omnirouteApiKey === 'string' ? merged.omnirouteApiKey : '';
+  merged.omnirouteBaseUrl = normalizeBaseUrl(merged.omnirouteBaseUrl) || PROVIDER_DEFAULTS.omniroute.baseUrl;
+  const omModel = typeof merged.omnirouteModel === 'string' ? merged.omnirouteModel.trim() : '';
+  merged.omnirouteModel = omModel || PROVIDER_DEFAULTS.omniroute.model;
+  merged.omnirouteEnabled = Boolean(
+    merged.omnirouteEnabled ||
+    merged.omnirouteApiKey.trim() ||
+    merged.preferredEngine === 'omniroute'
+  );
+  merged.maxHistoryItems = clampMaxHistory(merged.maxHistoryItems, DEFAULT_SETTINGS.maxHistoryItems);
+
   merged.schemaVersion = SCHEMA_VERSION;
   return merged;
 }
@@ -154,7 +233,7 @@ export async function saveSettings(partial) {
   const run = settingsWriteChain.then(async () => {
     const result = await chrome.storage.local.get('promptcraft_settings');
     const current = await migrateSettings(result.promptcraft_settings);
-    const updated = { ...current, ...partial, schemaVersion: SCHEMA_VERSION };
+    const updated = await migrateSettings({ ...current, ...partial });
     await chrome.storage.local.set({ promptcraft_settings: updated });
     return updated;
   });
@@ -164,31 +243,55 @@ export async function saveSettings(partial) {
 
 export async function getHistory() {
   const result = await chrome.storage.local.get('promptcraft_history');
-  return result.promptcraft_history || [];
+  return Array.isArray(result.promptcraft_history) ? result.promptcraft_history : [];
+}
+
+let historyWriteChain = Promise.resolve();
+
+function serializeHistoryWrite(fn) {
+  const run = historyWriteChain.then(fn);
+  historyWriteChain = run.then(() => {}, () => {});
+  return run;
 }
 
 export async function addHistoryEntry(entry) {
-  // Independent reads — fetch together so they overlap instead of serialising.
-  const [history, settings] = await Promise.all([getHistory(), getSettings()]);
-  const max = settings.maxHistoryItems || 20;
+  return serializeHistoryWrite(async () => {
+    // Independent reads — fetch together so they overlap instead of serialising.
+    const [history, settings] = await Promise.all([getHistory(), getSettings()]);
+    const max = clampMaxHistory(settings.maxHistoryItems, 20);
 
-  const newEntry = {
-    id: 'hist_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7),
-    timestamp: Date.now(),
-    original: entry.original,
-    optimized: entry.optimized,
-    engine: entry.engine,
-    framework: entry.framework,
-    degraded: Boolean(entry.degraded)
-  };
+    const newEntry = {
+      id: 'hist_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7),
+      timestamp: Date.now(),
+      original: entry.original,
+      optimized: entry.optimized,
+      engine: entry.engine,
+      framework: entry.framework,
+      degraded: Boolean(entry.degraded)
+    };
 
-  const updated = [newEntry, ...history.filter(h => h.original !== entry.original)].slice(0, max);
-  await chrome.storage.local.set({ promptcraft_history: updated });
-  return newEntry;
+    const updated = [
+      newEntry,
+      ...history.filter(h => !(h.original === entry.original && h.framework === entry.framework))
+    ].slice(0, max);
+    await chrome.storage.local.set({ promptcraft_history: updated });
+    return newEntry;
+  });
+}
+
+export async function removeHistoryEntry(id) {
+  return serializeHistoryWrite(async () => {
+    const history = await getHistory();
+    const updated = history.filter(h => h.id !== id);
+    await chrome.storage.local.set({ promptcraft_history: updated });
+    return updated.length !== history.length;
+  });
 }
 
 export async function clearHistory() {
-  await chrome.storage.local.set({ promptcraft_history: [] });
+  return serializeHistoryWrite(async () => {
+    await chrome.storage.local.set({ promptcraft_history: [] });
+  });
 }
 
 /* ------------------------------------------------------------------------ */

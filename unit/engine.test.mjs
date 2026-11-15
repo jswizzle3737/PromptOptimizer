@@ -10,7 +10,7 @@ const SYSTEM = 'You rewrite prompts.';
 const RAW = 'make me a website';
 
 function settings(extra = {}) {
-  return { promptcraft_settings: { schemaVersion: 3, ...extra } };
+  return { promptcraft_settings: { schemaVersion: 4, ...extra } };
 }
 
 const originalFetch = globalThis.fetch;
@@ -346,4 +346,140 @@ test('with no other keyed provider the offline template is used and marked degra
   assert.equal(r.degraded, true);
   assert.equal(r.fallbackReason, undefined);
   assert.equal(calls.length, 0);
+});
+
+/* ------------------------------------------------------------ OmniRoute */
+
+test('omniroute: supports keyless localhost default, Bearer key, custom baseUrl, and validates URL', () => {
+  const keyless = buildProviderRequest('omniroute', {
+    systemPrompt: SYSTEM, rawPrompt: RAW
+  });
+  assert.equal(keyless.url, 'http://localhost:20128/v1/chat/completions');
+  assert.ok(!('Authorization' in keyless.init.headers), 'keyless request must not send Authorization header');
+  assert.equal(JSON.parse(keyless.init.body).model, 'auto');
+
+  const keyed = buildProviderRequest('omniroute', {
+    systemPrompt: SYSTEM,
+    rawPrompt: RAW,
+    apiKey: ' gw-secret ',
+    model: 'auto/coding:free',
+    baseUrl: 'http://localhost:20128/custom///'
+  });
+  assert.equal(keyed.url, 'http://localhost:20128/custom/chat/completions');
+  assert.equal(keyed.init.headers.Authorization, 'Bearer gw-secret');
+  assert.equal(JSON.parse(keyed.init.body).model, 'auto/coding:free');
+
+  assert.throws(
+    () => buildProviderRequest('omniroute', { systemPrompt: SYSTEM, rawPrompt: RAW, baseUrl: 'ftp://invalid' }),
+    /Base URL is invalid/i
+  );
+});
+
+test('omniroute: optimizes keyless when chosen explicitly and participates in fallback only when enabled', async () => {
+  installChromeStub(settings({ preferredEngine: 'omniroute', omnirouteEnabled: false, omnirouteApiKey: '' }));
+  const calls = stubFetch(() => jsonResponse({ choices: [{ message: { content: 'Routed output' } }] }));
+  const explicit = await optimizePrompt(RAW);
+  assert.equal(explicit.engine, 'omniroute');
+  assert.equal(explicit.degraded, false);
+  assert.equal(explicit.optimized, 'Routed output');
+  assert.equal(calls.length, 1);
+
+  installChromeStub(settings({ preferredEngine: 'nano', omnirouteEnabled: false, omnirouteApiKey: '' }));
+  const skipped = stubFetch(() => { throw new Error('unconfigured omniroute should not be called as fallback'); });
+  const rSkipped = await optimizePrompt(RAW);
+  assert.equal(rSkipped.engine, 'offline');
+  assert.equal(rSkipped.degraded, true);
+  assert.equal(skipped.length, 0);
+
+  installChromeStub(settings({ preferredEngine: 'nano', omnirouteEnabled: true }));
+  stubFetch(() => jsonResponse({ choices: [{ message: { content: 'Fallback via gateway' } }] }));
+  const rFallback = await optimizePrompt(RAW);
+  assert.equal(rFallback.engine, 'omniroute');
+  assert.equal(rFallback.requestedEngine, 'nano');
+  assert.equal(rFallback.optimized, 'Fallback via gateway');
+});
+
+/* --------------------------------------------------- privacy & diagnostics */
+
+test('allowCloudFallback: false keeps Nano strictly offline even with saved cloud keys', async () => {
+  installChromeStub(settings({
+    preferredEngine: 'nano',
+    allowCloudFallback: false,
+    openaiApiKey: 'K',
+    geminiApiKey: 'G',
+    omnirouteEnabled: true
+  }));
+  const calls = stubFetch(() => { throw new Error('cloud endpoint must not be called'); });
+
+  const r = await optimizePrompt(RAW);
+
+  assert.equal(r.engine, 'offline');
+  assert.equal(r.requestedEngine, 'nano');
+  assert.equal(r.degraded, true);
+  assert.equal(calls.length, 0);
+});
+
+test('sendProviderRequest handles HTTP-date Retry-After header and Gemini block/finish diagnostics', async () => {
+  let attempt = 0;
+  stubFetch(() => {
+    attempt++;
+    if (attempt === 1) {
+      const soon = new Date(Date.now() + 60).toUTCString();
+      return jsonResponse({ error: { message: 'rate limited' } }, 429, { 'Retry-After': soon });
+    }
+    return jsonResponse({ choices: [{ message: { content: 'Recovered via HTTP-date' } }] });
+  });
+  const ok = await sendProviderRequest('openai', {
+    apiKey: 'K', model: 'm', rawPrompt: RAW, systemPrompt: SYSTEM
+  }, 5000);
+  assert.equal(attempt, 2);
+  assert.equal(ok.spec.extract(ok.data), 'Recovered via HTTP-date');
+
+  installChromeStub(settings({ preferredEngine: 'gemini', geminiApiKey: 'G' }));
+  stubFetch(() => jsonResponse({ promptFeedback: { blockReason: 'SAFETY' } }));
+  const blocked = await optimizePrompt(RAW);
+  assert.equal(blocked.degraded, true);
+  assert.match(blocked.degradedReason, /blocked the request \(SAFETY\)/i);
+
+  stubFetch(() => jsonResponse({ candidates: [{ finishReason: 'RECITATION' }] }));
+  const stopped = await optimizePrompt(RAW);
+  assert.equal(stopped.degraded, true);
+  assert.match(stopped.degradedReason, /stopped early \(RECITATION\)/i);
+});
+
+/* ----------------------------------------------------------- Nano quota */
+
+test('nano: trims oversized page_context to fit inputQuota and turns QuotaExceededError into a clear message', async () => {
+  installChromeStub(settings({ preferredEngine: 'nano' }));
+  const seenPrompts = [];
+  globalThis.LanguageModel = {
+    availability: async () => 'available',
+    create: async () => ({
+      inputQuota: 500,
+      measureInputUsage: async msg => msg.length,
+      prompt: async msg => {
+        seenPrompts.push(msg);
+        return 'Act as an engineer. Context: trimmed. Format: Markdown. Verify assumptions. Requirements:\n1. Handle edge cases.';
+      },
+      destroy() {}
+    })
+  };
+  const r = await optimizePrompt(RAW, { context: 'A'.repeat(1200), nanoJudge: false, scoreRetry: false });
+  assert.equal(r.degraded, false);
+  assert.ok(seenPrompts[0].length <= 425, `prompt length ${seenPrompts[0].length} should fit inside safe budget`);
+
+  globalThis.LanguageModel = {
+    availability: async () => 'available',
+    create: async () => ({
+      prompt: async () => {
+        const err = new Error('Too big');
+        err.name = 'QuotaExceededError';
+        throw err;
+      },
+      destroy() {}
+    })
+  };
+  const quotaErr = await optimizePrompt(RAW, { nanoJudge: false, scoreRetry: false });
+  assert.equal(quotaErr.degraded, true);
+  assert.match(quotaErr.degradedReason, /on-device context limit/i);
 });
