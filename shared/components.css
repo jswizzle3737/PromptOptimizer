@@ -288,7 +288,12 @@
     background-color var(--dur-fast) var(--ease-standard);
 }
 
-.pc-select__trigger:hover { border-color: var(--border-strong); }
+.pc-select__trigger:hover:not(:disabled) { border-color: var(--border-strong); }
+
+.pc-select__trigger:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
 
 .pc-select__trigger[aria-expanded="true"],
 .pc-select__trigger:focus-visible {

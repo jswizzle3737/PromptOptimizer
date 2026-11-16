@@ -6,6 +6,7 @@ import {
 import { checkBuiltInPromptApiStatus, verifyProvider } from '../shared/optimizer-engine.js';
 import { NANO_SESSION_OPTIONS } from '../shared/nano.js';
 import { engineOptions, DEFAULT_ENGINE, ENGINE_LABELS } from '../shared/engines.js';
+import { isLocalEndpoint } from '../shared/secrets.js';
 import {
   LIBRARY_KEY, LIMITS, getLibrary, saveToLibrary, updateLibraryEntry, deleteLibraryEntry,
   collectLabels, filterLibrary, normalizeLabels, deriveTitle
@@ -18,6 +19,7 @@ import { createThemePicker, applyTheme, watchTheme, getTheme } from '../shared/t
 import { icon, hydrateIcons, ICON_NAMES, hasIcon } from '../shared/icons.js';
 
 const CUSTOM_MODEL = '__custom__';
+const DEFAULT_FALLBACK_MODEL = '__default__';
 const HISTORY_KEY = 'promptcraft_history';
 const FRAMEWORKS_KEY = 'promptcraft_frameworks';
 
@@ -30,6 +32,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     themeSlot: $('theme-picker-slot'),
     engineSlot: $('preferred-engine-slot'),
     frameworkSlot: $('preferred-framework-slot'),
+    fallback1EngineSlot: $('fallback-1-engine-slot'),
+    fallback1PresetSlot: $('fallback-1-preset-slot'),
+    fallback1Model: $('fallback-1-model'),
+    fallback1Hint: $('fallback-1-hint'),
+    fallback2EngineSlot: $('fallback-2-engine-slot'),
+    fallback2PresetSlot: $('fallback-2-preset-slot'),
+    fallback2Model: $('fallback-2-model'),
+    fallback2Hint: $('fallback-2-hint'),
     allowCloudFallback: $('allow-cloud-fallback'),
     saveStatus: $('save-status'),
     saveStatusDot: $('save-status-dot'),
@@ -114,6 +124,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     return {
       preferredEngine: engineSelect.getValue(),
       preferredFramework: frameworkSelect.getValue(),
+      fallback1Engine: fallback1.engineSelect.getValue(),
+      fallback1Model: el.fallback1Model.value.trim(),
+      fallback2Engine: fallback2.engineSelect.getValue(),
+      fallback2Model: el.fallback2Model.value.trim(),
       allowCloudFallback: el.allowCloudFallback.checked,
       geminiApiKey: el.geminiApiKey.value.trim(),
       geminiModel: el.geminiModel.value.trim(),
@@ -176,11 +190,40 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
   /* ------------------------------------------------------------- Controls */
+  const MODEL_FIELDS = {
+    gemini: el.geminiModel,
+    openai: el.openaiModel,
+    anthropic: el.anthropicModel,
+    openrouter: el.orModelInput,
+    omniroute: el.omniModelInput
+  };
+  const API_KEY_FIELDS = {
+    gemini: el.geminiApiKey,
+    openai: el.openaiApiKey,
+    anthropic: el.anthropicApiKey,
+    openrouter: el.orApiKey
+  };
+
+  let orRawCatalog = null;
+  let orShowAll = false;
+  let orFilterQuery = '';
+  let orModels = OPENROUTER_FREE_MODELS.slice();
+  let omniModels = PROVIDER_MODEL_PRESETS.omniroute.slice();
+
+  function refreshFallbackSlots() {
+    fallback1.syncControls();
+    fallback2.syncControls();
+    updateFallbackHints();
+  }
+
   const engineSelect = createSelect({
     options: engineOptions({ full: true }),
     value: settings.preferredEngine || DEFAULT_ENGINE,
     label: 'Default engine',
-    onChange: () => syncDirtyState()
+    onChange: () => {
+      updateFallbackHints();
+      syncDirtyState();
+    }
   });
   el.engineSlot.appendChild(engineSelect.element);
 
@@ -204,6 +247,225 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
   el.fwIconSlot.appendChild(fwIconSelect.element);
 
+  /* ---------------------------------------------- Ordered fallback models */
+  function fallbackEngineOptions() {
+    return [
+      { value: '', label: 'None (automatic fallback)', desc: 'Use remaining keyed providers automatically', icon: 'wand' },
+      ...engineOptions({ full: true }).map(opt =>
+        opt.value === 'offline'
+          ? { ...opt, label: 'Offline (stop here)', desc: 'Degrade to offline template without trying later providers' }
+          : opt
+      )
+    ];
+  }
+
+  function providerDefaultModel(eng) {
+    return MODEL_FIELDS[eng]?.value.trim() || PROVIDER_DEFAULTS[eng]?.model || '';
+  }
+
+  function fallbackPresetModelsFor(eng) {
+    if (eng === 'openrouter') {
+      if (orRawCatalog) {
+        const pool = orShowAll ? orRawCatalog : orRawCatalog.filter(isOpenRouterFree);
+        return pool.slice(0, 120);
+      }
+      return OPENROUTER_FREE_MODELS;
+    }
+    if (eng === 'omniroute') return omniModels;
+    return PROVIDER_MODEL_PRESETS[eng] || [];
+  }
+
+  function buildFallbackPresetOptions(eng, models) {
+    const iconName = eng === 'omniroute' || eng === 'openrouter' ? 'branch' : 'cloud';
+    const configuredDefault = providerDefaultModel(eng);
+    return [
+      {
+        value: DEFAULT_FALLBACK_MODEL,
+        label: 'Default (provider setting)',
+        desc: configuredDefault ? `Currently ${configuredDefault}` : 'Uses provider default',
+        icon: iconName
+      },
+      ...models.map(m => ({ value: m.id, label: m.name || m.id, desc: m.id, icon: iconName })),
+      { value: CUSTOM_MODEL, label: 'Custom model ID…', desc: 'Type your own on the right', icon: 'edit' }
+    ];
+  }
+
+  function createFallbackBinding({ index, engineSlot, presetSlot, modelInput }) {
+    const engineSelectSlot = createSelect({
+      options: fallbackEngineOptions(),
+      value: '',
+      label: `Fallback ${index} engine`,
+      placement: 'down',
+      onChange: () => {
+        modelInput.value = '';
+        syncControls();
+        updateFallbackHints();
+        syncDirtyState();
+      }
+    });
+    engineSlot.appendChild(engineSelectSlot.element);
+
+    const presetSelect = createSelect({
+      options: [
+        { value: DEFAULT_FALLBACK_MODEL, label: 'No model selection', desc: 'Pick an engine to choose a model', icon: 'wand' }
+      ],
+      value: DEFAULT_FALLBACK_MODEL,
+      label: `Fallback ${index} model preset`,
+      placement: 'down',
+      onChange: v => {
+        if (v === DEFAULT_FALLBACK_MODEL) {
+          modelInput.value = '';
+        } else if (v === CUSTOM_MODEL) {
+          modelInput.focus();
+          modelInput.select();
+        } else {
+          modelInput.value = v;
+        }
+        updateFallbackHints();
+        syncDirtyState();
+      }
+    });
+    presetSlot.appendChild(presetSelect.element);
+
+    function syncPresetFromInput() {
+      const eng = engineSelectSlot.getValue();
+      if (!eng || eng === 'nano' || eng === 'offline') return;
+      const typed = modelInput.value.trim();
+      if (!typed) {
+        if (presetSelect.getValue() !== DEFAULT_FALLBACK_MODEL) {
+          presetSelect.setValue(DEFAULT_FALLBACK_MODEL, { silent: true });
+        }
+        return;
+      }
+      const models = fallbackPresetModelsFor(eng);
+      const want = models.some(m => m.id === typed) ? typed : CUSTOM_MODEL;
+      if (presetSelect.getValue() !== want) presetSelect.setValue(want, { silent: true });
+    }
+
+    function syncControls() {
+      const eng = engineSelectSlot.getValue();
+      const hasModel = Boolean(eng && eng !== 'nano' && eng !== 'offline');
+      const trigger = presetSelect.element.querySelector('.pc-select__trigger');
+
+      if (!hasModel) {
+        if (modelInput.value !== '') modelInput.value = '';
+        modelInput.placeholder = 'No model needed';
+        modelInput.disabled = true;
+        presetSelect.setOptions([
+          {
+            value: DEFAULT_FALLBACK_MODEL,
+            label: 'No model selection',
+            desc: 'Not used for this option',
+            icon: eng === 'nano' ? 'cpu' : eng === 'offline' ? 'shield' : 'wand'
+          }
+        ]);
+        presetSelect.setValue(DEFAULT_FALLBACK_MODEL, { silent: true });
+        if (trigger) trigger.disabled = true;
+        return;
+      }
+
+      const defaultModel = providerDefaultModel(eng);
+      modelInput.disabled = false;
+      modelInput.placeholder = defaultModel ? `Default (${defaultModel})` : 'Provider default';
+      if (trigger) trigger.disabled = false;
+
+      presetSelect.setOptions(buildFallbackPresetOptions(eng, fallbackPresetModelsFor(eng)));
+      syncPresetFromInput();
+    }
+
+    modelInput.addEventListener('input', () => {
+      syncPresetFromInput();
+      updateFallbackHints();
+      syncDirtyState();
+    });
+
+    return { engineSelect: engineSelectSlot, presetSelect, syncControls };
+  }
+
+  function isLocalSelection(eng) {
+    if (eng === 'nano' || eng === 'offline') return true;
+    if (eng !== 'omniroute') return false;
+    return isLocalEndpoint(el.omniBaseUrl.value.trim() || PROVIDER_DEFAULTS.omniroute.baseUrl);
+  }
+
+  function updateFallbackHints() {
+    const primary = engineSelect.getValue();
+    const allowCloud = el.allowCloudFallback.checked;
+    const primaryLocal = isLocalSelection(primary);
+    const fb1Eng = fallback1.engineSelect.getValue();
+    const fb1Raw = el.fallback1Model.value.trim();
+
+    for (const idx of [1, 2]) {
+      const slot = idx === 1 ? fallback1 : fallback2;
+      const input = idx === 1 ? el.fallback1Model : el.fallback2Model;
+      const hintEl = idx === 1 ? el.fallback1Hint : el.fallback2Hint;
+      const eng = slot.engineSelect.getValue();
+      const rawModel = input.value.trim();
+
+      if (idx === 2 && fb1Eng === 'offline') {
+        hintEl.textContent = 'Skipped because Fallback 1 stops at the offline template.';
+        continue;
+      }
+      if (!eng) {
+        hintEl.textContent = allowCloud
+          ? 'Empty slot. Unlisted providers with saved keys still act as automatic backups.'
+          : 'Empty slot. Automatic cloud fallback is off.';
+        continue;
+      }
+      if (eng === 'offline') {
+        hintEl.textContent = 'Stops the fallback chain here and returns the offline template immediately.';
+        continue;
+      }
+      if (!allowCloud && primaryLocal && !isLocalSelection(eng)) {
+        hintEl.textContent = 'Skipped while cloud fallback is turned off below for local engines.';
+        continue;
+      }
+      if (API_KEY_FIELDS[eng] && !API_KEY_FIELDS[eng].value.trim()) {
+        hintEl.textContent = `No ${ENGINE_LABELS[eng] || eng} API key entered below yet — skipped until a key is saved.`;
+        continue;
+      }
+      if (eng === 'nano') {
+        hintEl.textContent = primary === 'nano'
+          ? 'Matches Default engine (Chrome Nano) and is skipped unless Default engine changes.'
+          : 'Runs on-device Chrome built-in Nano if it is available in this browser.';
+        continue;
+      }
+
+      const effModel = rawModel || providerDefaultModel(eng);
+      const effPrimaryModel = providerDefaultModel(primary);
+      if (eng === primary && effModel === effPrimaryModel) {
+        hintEl.textContent = `Matches Default engine (${ENGINE_LABELS[eng] || eng} · ${effModel}) — enter a different Model ID override to retry another model on this provider.`;
+        continue;
+      }
+      if (idx === 2 && fb1Eng && fb1Eng !== 'nano' && fb1Eng !== 'offline') {
+        const effFb1Model = fb1Raw || providerDefaultModel(fb1Eng);
+        if (eng === fb1Eng && effModel === effFb1Model) {
+          hintEl.textContent = `Matches Fallback 1 (${ENGINE_LABELS[fb1Eng] || fb1Eng} · ${effFb1Model}) and will be skipped as a duplicate.`;
+          continue;
+        }
+      }
+      if (eng === 'omniroute') {
+        hintEl.textContent = `Routes via OmniRoute (${effModel}) when earlier engines fail, even if general OmniRoute auto-fallback is off.`;
+        continue;
+      }
+      hintEl.textContent = `Runs ${ENGINE_LABELS[eng] || eng} (${effModel}) if earlier engines fail.`;
+    }
+  }
+
+  const fallback1 = createFallbackBinding({
+    index: 1,
+    engineSlot: el.fallback1EngineSlot,
+    presetSlot: el.fallback1PresetSlot,
+    modelInput: el.fallback1Model
+  });
+
+  const fallback2 = createFallbackBinding({
+    index: 2,
+    engineSlot: el.fallback2EngineSlot,
+    presetSlot: el.fallback2PresetSlot,
+    modelInput: el.fallback2Model
+  });
+
   /* ------------------------------------------------ Provider model presets */
   function createPresetBinding({ presets, input, slot, label, iconName = 'cloud', placement = 'up' }) {
     let list = presets.slice();
@@ -225,6 +487,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           input.select();
         } else {
           input.value = v;
+          refreshFallbackSlots();
           syncDirtyState();
         }
       }
@@ -280,11 +543,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
   /* --------------------------------------------------- OpenRouter catalog */
-  let orRawCatalog = null;
-  let orShowAll = false;
-  let orFilterQuery = '';
-  let orModels = OPENROUTER_FREE_MODELS.slice();
-
   function isOpenRouterFree(m) {
     return m.id === 'openrouter/free'
       || m.id.endsWith(':free')
@@ -318,6 +576,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         el.orModelInput.select();
       } else {
         el.orModelInput.value = v;
+        refreshFallbackSlots();
         syncDirtyState();
       }
     }
@@ -347,6 +606,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
       orRawCatalog = all;
       refreshOpenRouterOptions();
+      refreshFallbackSlots();
       const freeCount = all.filter(isOpenRouterFree).length;
       toast(orShowAll ? `Loaded ${all.length} models` : `Loaded ${freeCount} free models`);
     } catch (err) {
@@ -371,6 +631,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       await fetchOpenRouterCatalog();
     } else {
       refreshOpenRouterOptions();
+      refreshFallbackSlots();
     }
   });
 
@@ -416,14 +677,18 @@ document.addEventListener('DOMContentLoaded', async () => {
         .filter(m => m.id && !seen.has(m.id));
 
       if (!discovered.length) {
+        omniModels = PROVIDER_MODEL_PRESETS.omniroute.slice();
+        omniPreset.setModels(omniModels);
         toast('Gateway answered; using default auto routes', 'neutral');
       } else {
-        omniPreset.setModels([...PROVIDER_MODEL_PRESETS.omniroute, ...discovered]);
+        omniModels = [...PROVIDER_MODEL_PRESETS.omniroute, ...discovered];
+        omniPreset.setModels(omniModels);
         toast(`Loaded ${discovered.length} OmniRoute route${discovered.length === 1 ? '' : 's'}`);
       }
       if (!el.omniEnabled.checked) {
         el.omniEnabled.checked = true;
       }
+      refreshFallbackSlots();
       syncDirtyState();
     } catch (err) {
       toast(`Fetch failed: ${err.message}`, 'danger');
@@ -438,13 +703,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   engineSelect.setValue(preferredEngine, { silent: true });
   el.allowCloudFallback.checked = settings.allowCloudFallback !== false;
 
-  const MODEL_FIELDS = {
-    gemini: el.geminiModel,
-    openai: el.openaiModel,
-    anthropic: el.anthropicModel,
-    openrouter: el.orModelInput,
-    omniroute: el.omniModelInput
-  };
   for (const [provider, input] of Object.entries(MODEL_FIELDS)) {
     input.placeholder = PROVIDER_DEFAULTS[provider].model;
     input.value = settings[`${provider}Model`] || PROVIDER_DEFAULTS[provider].model;
@@ -470,6 +728,12 @@ document.addEventListener('DOMContentLoaded', async () => {
   omniPreset.syncFromInput();
   refreshOpenRouterOptions();
 
+  el.fallback1Model.value = settings.fallback1Model || '';
+  el.fallback2Model.value = settings.fallback2Model || '';
+  fallback1.engineSelect.setValue(settings.fallback1Engine || '', { silent: true });
+  fallback2.engineSelect.setValue(settings.fallback2Engine || '', { silent: true });
+  refreshFallbackSlots();
+
   el.maxHistory.addEventListener('change', () => {
     el.maxHistory.value = String(clampMaxHistory(el.maxHistory.value, 20));
     syncDirtyState();
@@ -479,17 +743,25 @@ document.addEventListener('DOMContentLoaded', async () => {
     syncDirtyState();
   });
 
-  const watchedTextInputs = [
+  const fallbackSensitiveInputs = [
     el.orApiKey, el.orModelInput,
     el.omniBaseUrl, el.omniApiKey, el.omniModelInput,
     el.geminiApiKey, el.geminiModel,
     el.openaiApiKey, el.openaiModel,
-    el.anthropicApiKey, el.anthropicModel,
+    el.anthropicApiKey, el.anthropicModel
+  ];
+  fallbackSensitiveInputs.forEach(input => input.addEventListener('input', refreshFallbackSlots));
+
+  const watchedTextInputs = [
+    ...fallbackSensitiveInputs,
     el.customPrompt, el.maxHistory
   ];
   watchedTextInputs.forEach(input => input.addEventListener('input', syncDirtyState));
   [el.allowCloudFallback, el.omniEnabled, el.widgetToggle].forEach(cb => {
-    cb.addEventListener('change', syncDirtyState);
+    cb.addEventListener('change', () => {
+      updateFallbackHints();
+      syncDirtyState();
+    });
   });
 
   /* ---------------------------------------------------------- Frameworks */
@@ -1293,8 +1565,12 @@ document.addEventListener('DOMContentLoaded', async () => {
   /* --------------------------------------------------------------- Save */
   el.saveBtn.addEventListener('click', async () => {
     const chosenEngine = engineSelect.getValue();
+    const fb1Engine = fallback1.engineSelect.getValue();
+    const fb2Engine = fallback2.engineSelect.getValue();
     const rawOmniUrl = el.omniBaseUrl.value.trim();
     const needsOmniPermission = chosenEngine === 'omniroute'
+      || fb1Engine === 'omniroute'
+      || fb2Engine === 'omniroute'
       || el.omniEnabled.checked
       || (Boolean(rawOmniUrl) && normalizeBaseUrl(rawOmniUrl) !== PROVIDER_DEFAULTS.omniroute.baseUrl);
 
@@ -1317,6 +1593,10 @@ document.addEventListener('DOMContentLoaded', async () => {
       const saved = await saveSettings({
         preferredEngine: chosenEngine,
         preferredFramework: frameworkSelect.getValue(),
+        fallback1Engine: fb1Engine,
+        fallback1Model: el.fallback1Model.value.trim(),
+        fallback2Engine: fb2Engine,
+        fallback2Model: el.fallback2Model.value.trim(),
         allowCloudFallback: el.allowCloudFallback.checked,
         theme,
         geminiApiKey: el.geminiApiKey.value.trim(),
@@ -1344,12 +1624,17 @@ document.addEventListener('DOMContentLoaded', async () => {
       el.omniModelInput.value = saved.omnirouteModel;
       el.omniEnabled.checked = Boolean(saved.omnirouteEnabled);
       el.maxHistory.value = String(saved.maxHistoryItems);
+      el.fallback1Model.value = saved.fallback1Model || '';
+      el.fallback2Model.value = saved.fallback2Model || '';
+      fallback1.engineSelect.setValue(saved.fallback1Engine || '', { silent: true });
+      fallback2.engineSelect.setValue(saved.fallback2Engine || '', { silent: true });
 
       geminiPreset.syncFromInput();
       openaiPreset.syncFromInput();
       anthropicPreset.syncFromInput();
       omniPreset.syncFromInput();
       refreshOpenRouterOptions();
+      refreshFallbackSlots();
       markClean();
       toast('Settings saved');
     } catch (err) {

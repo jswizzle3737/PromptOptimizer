@@ -258,8 +258,8 @@ async function runRequest(payload = {}, sender, io = {}) {
 /**
  * Streaming requests. The caller connects a port named 'optimize' and posts
  * { type: 'start', payload }; the worker answers with
- *   { type: 'start', engine }   an engine began (discard any streamed text)
- *   { type: 'token', delta }    streamed text
+ *   { type: 'start', engine, model? }   an engine began (discard any streamed text)
+ *   { type: 'token', delta }            streamed text
  *   { type: 'done', data } | { type: 'error', error } | { type: 'cancelled' }
  * Posting { type: 'cancel' } or disconnecting aborts the request.
  */
@@ -276,7 +276,7 @@ chrome.runtime.onConnect.addListener(port => {
       const data = await runRequest(msg.payload, port.sender, {
         signal: ctl.signal,
         onToken: delta => post({ type: 'token', delta }),
-        onStart: engine => post({ type: 'start', engine })
+        onStart: (engine, model) => post({ type: 'start', engine, ...(model && { model }) })
       });
       post({ type: 'done', data });
     } catch (err) {

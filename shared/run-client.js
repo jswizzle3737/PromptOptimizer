@@ -4,8 +4,8 @@
  *
  * Starts one request and returns { promise, cancel }. The promise resolves
  * with the result, or with null when cancelled; it rejects with the worker's
- * error. `onStart(engine)` fires when an engine begins, again for each
- * fallback engine: the caller discards any text streamed so far.
+ * error. `onStart(engine, model)` fires when an engine begins, again for each
+ * fallback engine or model: the caller discards any text streamed so far.
  */
 export function startRun(payload, { onStart, onToken } = {}) {
   const port = chrome.runtime.connect({ name: 'optimize' });
@@ -22,7 +22,7 @@ export function startRun(payload, { onStart, onToken } = {}) {
   };
 
   port.onMessage.addListener(msg => {
-    if (msg?.type === 'start') onStart?.(msg.engine);
+    if (msg?.type === 'start') onStart?.(msg.engine, msg.model);
     else if (msg?.type === 'token') onToken?.(msg.delta);
     else if (msg?.type === 'done') finish(resolveRun, msg.data);
     else if (msg?.type === 'cancelled') finish(resolveRun, null);

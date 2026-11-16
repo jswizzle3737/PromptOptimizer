@@ -309,6 +309,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     el.loadingState.hidden = true;
     el.degradedNotice.hidden = true;
     el.engineBadge.hidden = true;
+    el.engineBadge.title = '';
     el.qualityChip.hidden = true;
     el.variantChips.hidden = true;
     el.techChips.hidden = true;
@@ -384,6 +385,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (state.resultEngine) {
           el.engineBadge.textContent = ENGINE_LABELS[state.resultEngine] || state.resultEngine;
           el.engineBadge.className = 'pc-badge pc-badge--mono ' + (item.degraded ? 'pc-badge--warning' : 'pc-badge--accent');
+          el.engineBadge.title = '';
+        } else {
+          el.engineBadge.title = '';
         }
         el.variantChips.hidden = true;
         el.techChips.hidden = true;
@@ -586,8 +590,20 @@ document.addEventListener('DOMContentLoaded', async () => {
       el.engineBadge.textContent = ENGINE_LABELS[state.resultEngine] || state.resultEngine;
       el.engineBadge.className = 'pc-badge pc-badge--mono ' +
         (state.lastData.degraded ? 'pc-badge--warning' : 'pc-badge--accent');
+      if (state.lastData.fallbackReason) {
+        const requested = ENGINE_LABELS[state.lastData.requestedEngine] || state.lastData.requestedEngine;
+        const sameProvider = state.lastData.engine === state.lastData.requestedEngine;
+        el.engineBadge.title = sameProvider && state.lastData.requestedModel
+          ? `${requested} (${state.lastData.requestedModel}) failed: ${state.lastData.fallbackReason}`
+          : `${requested} failed: ${state.lastData.fallbackReason}`;
+      } else {
+        el.engineBadge.title = state.lastData.model
+          ? `${ENGINE_LABELS[state.resultEngine] || state.resultEngine} (${state.lastData.model})`
+          : '';
+      }
       el.engineBadge.hidden = false;
     } else {
+      el.engineBadge.title = '';
       el.engineBadge.hidden = true;
     }
     renderVariantChips();
@@ -716,6 +732,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     renderTechChips(data.techniques);
 
     if (data.degraded) {
+      el.engineBadge.title = '';
       showDegraded(data);
       setStatus('Offline fallback', 'warning');
       toast('Fell back to the offline template', 'danger');
@@ -726,18 +743,35 @@ document.addEventListener('DOMContentLoaded', async () => {
         el.setupCard.hidden = true;
       }
       if (data.fallbackReason) {
-        /* Another configured provider answered for the chosen one. */
+        /* Another configured provider or fallback model answered for the chosen one. */
         const requested = ENGINE_LABELS[data.requestedEngine] || data.requestedEngine;
         const used = ENGINE_LABELS[data.engine] || data.engine;
-        el.engineBadge.title = `${requested} failed: ${data.fallbackReason}`;
-        setStatus(`Used ${used}`, 'warning');
-        toast(`${requested} unavailable, used ${used}`, 'neutral');
+        const sameProvider = data.engine === data.requestedEngine;
+        if (sameProvider) {
+          el.engineBadge.title = data.requestedModel && data.model
+            ? `${requested} (${data.requestedModel}) failed: ${data.fallbackReason}`
+            : `${requested} failed: ${data.fallbackReason}`;
+          setStatus(data.model ? `Used ${data.model}` : `Used ${used}`, 'warning');
+          toast(
+            data.model
+              ? `${data.requestedModel || requested} failed, used ${data.model}`
+              : `${requested} fallback used`,
+            'neutral'
+          );
+        } else {
+          el.engineBadge.title = `${requested} failed: ${data.fallbackReason}`;
+          setStatus(`Used ${used}`, 'warning');
+          toast(
+            `${requested} unavailable, used ${used}${data.model ? ` (${data.model})` : ''}`,
+            'neutral'
+          );
+        }
       } else if (data.truncated) {
-        el.engineBadge.title = '';
+        el.engineBadge.title = data.model ? `${ENGINE_LABELS[data.engine] || data.engine} (${data.model})` : '';
         setStatus('Cut off', 'warning');
         toast('The output was cut off. Press Continue to finish it.', 'neutral');
       } else {
-        el.engineBadge.title = '';
+        el.engineBadge.title = data.model ? `${ENGINE_LABELS[data.engine] || data.engine} (${data.model})` : '';
         setStatus('Done', 'success');
         toast(data.refinement ? 'Prompt refined' : 'Prompt optimized', 'success');
       }
@@ -791,11 +825,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (base) paint(base);
 
     currentRun = startRun({ ...payload, engine: state.engine, frameworkId: state.framework }, {
-      onStart: engine => {
+      onStart: (engine, model) => {
         streamed = base;
+        const label = ENGINE_LABELS[engine] || engine;
+        const withModel = model ? `${label} (${model})` : label;
         const engineWait = isOptimize && state.variantCount > 1
-          ? `${ENGINE_LABELS[engine] || engine} (${state.variantCount} variants)…`
-          : `${ENGINE_LABELS[engine] || engine}…`;
+          ? `${withModel} (${state.variantCount} variants)…`
+          : `${withModel}…`;
         if (base) {
           setStatus(engineWait, 'neutral');
           paint(base);

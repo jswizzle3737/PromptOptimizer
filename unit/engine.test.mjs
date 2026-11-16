@@ -2,7 +2,7 @@ import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { installChromeStub, stubFetch, jsonResponse } from './helpers.mjs';
 import {
-  optimizePrompt, buildUserMessage, buildProviderRequest, cleanModelOutput,
+  optimizePrompt, refinePrompt, clarifyPrompt, buildUserMessage, buildProviderRequest, cleanModelOutput,
   verifyProvider, checkBuiltInPromptApiStatus, escapeRawPromptTags, sendProviderRequest
 } from '../shared/optimizer-engine.js';
 
@@ -10,7 +10,7 @@ const SYSTEM = 'You rewrite prompts.';
 const RAW = 'make me a website';
 
 function settings(extra = {}) {
-  return { promptcraft_settings: { schemaVersion: 4, ...extra } };
+  return { promptcraft_settings: { schemaVersion: 5, ...extra } };
 }
 
 const originalFetch = globalThis.fetch;
@@ -520,4 +520,287 @@ test('nano: trims oversized page_context to fit inputQuota and turns QuotaExceed
   const quotaErr = await optimizePrompt(RAW, { nanoJudge: false, scoreRetry: false });
   assert.equal(quotaErr.degraded, true);
   assert.match(quotaErr.degradedReason, /on-device context limit/i);
+});
+
+/* ----------------------------------------------------- ordered fallback chain */
+
+test('same-provider fallback retries the same engine with Fallback 1 model override', async () => {
+  installChromeStub(settings({
+    preferredEngine: 'openai',
+    openaiApiKey: 'K',
+    openaiModel: 'gpt-4.1',
+    fallback1Engine: 'openai',
+    fallback1Model: 'gpt-4o-mini'
+  }));
+  const calls = stubFetch((url, init) => {
+    const body = JSON.parse(init.body);
+    if (body.model === 'gpt-4.1') {
+      return jsonResponse({ error: { message: 'model overloaded' } }, 404);
+    }
+    return jsonResponse({ choices: [{ message: { content: 'Fallback model output' } }] });
+  });
+  const starts = [];
+  const r = await optimizePrompt(RAW, {
+    nanoJudge: false,
+    scoreRetry: false,
+    onStart: (engine, model) => starts.push([engine, model])
+  });
+
+  assert.equal(r.degraded, false);
+  assert.equal(r.engine, 'openai');
+  assert.equal(r.model, 'gpt-4o-mini');
+  assert.equal(r.requestedEngine, 'openai');
+  assert.equal(r.requestedModel, 'gpt-4.1');
+  assert.match(r.fallbackReason, /404/);
+  assert.deepEqual(calls.map(c => JSON.parse(c.init.body).model), ['gpt-4.1', 'gpt-4o-mini']);
+  assert.deepEqual(starts, [['openai', 'gpt-4.1'], ['openai', 'gpt-4o-mini']]);
+});
+
+test('fallback chain deduplicates identical (engine, model) slots and skips seenEngines in auto-fallback', async () => {
+  // Exact duplicate (openai, gpt-4.1) in Fallback 1 is skipped before Fallback 2 (gemini).
+  installChromeStub(settings({
+    preferredEngine: 'openai',
+    openaiApiKey: 'K',
+    openaiModel: 'gpt-4.1',
+    fallback1Engine: 'openai',
+    fallback1Model: 'gpt-4.1',
+    fallback2Engine: 'gemini',
+    fallback2Model: 'gemini-2.5-pro',
+    geminiApiKey: 'G',
+    anthropicApiKey: 'A'
+  }));
+  const calls = stubFetch(url => {
+    if (url.includes('api.openai.com')) {
+      return jsonResponse({ error: { message: 'openai down' } }, 404);
+    }
+    return jsonResponse({ candidates: [{ content: { parts: [{ text: 'From Gemini 2.5 Pro' }] } }] });
+  });
+  const r1 = await optimizePrompt(RAW, { nanoJudge: false, scoreRetry: false });
+  assert.equal(r1.engine, 'gemini');
+  assert.equal(r1.model, 'gemini-2.5-pro');
+  assert.equal(calls.length, 2);
+  assert.ok(calls[0].url.includes('api.openai.com'));
+  assert.ok(calls[1].url.includes('gemini-2.5-pro'));
+
+  // Same-provider fallback fails on alternate model: auto-fallback tries keyed Gemini once, never retries OpenAI.
+  installChromeStub(settings({
+    preferredEngine: 'openai',
+    openaiApiKey: 'K',
+    openaiModel: 'gpt-4.1',
+    fallback1Engine: 'openai',
+    fallback1Model: 'gpt-4o-mini',
+    geminiApiKey: 'G'
+  }));
+  const calls2 = stubFetch(url => {
+    if (url.includes('api.openai.com')) {
+      return jsonResponse({ error: { message: 'openai rejected' } }, 404);
+    }
+    return jsonResponse({ candidates: [{ content: { parts: [{ text: 'Auto Gemini output' }] } }] });
+  });
+  const r2 = await optimizePrompt(RAW, { nanoJudge: false, scoreRetry: false });
+  assert.equal(r2.engine, 'gemini');
+  assert.deepEqual(
+    calls2.map(c => (c.url.includes('api.openai.com') ? JSON.parse(c.init.body).model : 'gemini')),
+    ['gpt-4.1', 'gpt-4o-mini', 'gemini']
+  );
+});
+
+test('cross-provider Fallback 1 -> Fallback 2 order overrides PROVIDERS declaration order', async () => {
+  installChromeStub(settings({
+    preferredEngine: 'gemini',
+    geminiApiKey: 'G',
+    openaiApiKey: 'O',
+    anthropicApiKey: 'A',
+    fallback1Engine: 'anthropic',
+    fallback1Model: 'claude-sonnet-4-6',
+    fallback2Engine: 'openai',
+    fallback2Model: 'gpt-4o-mini'
+  }));
+  const calls = stubFetch(url => {
+    if (url.includes('generativelanguage.googleapis.com') || url.includes('api.anthropic.com')) {
+      return jsonResponse({ error: { message: 'nope' } }, 404);
+    }
+    return jsonResponse({ choices: [{ message: { content: 'OpenAI second fallback won' } }] });
+  });
+  const r = await optimizePrompt(RAW, { nanoJudge: false, scoreRetry: false });
+  assert.equal(r.engine, 'openai');
+  assert.equal(r.model, 'gpt-4o-mini');
+  assert.equal(calls.length, 3);
+  assert.ok(calls[0].url.includes('generativelanguage.googleapis.com'));
+  assert.ok(calls[1].url.includes('api.anthropic.com'));
+  assert.equal(JSON.parse(calls[1].init.body).model, 'claude-sonnet-4-6');
+  assert.ok(calls[2].url.includes('api.openai.com'));
+  assert.equal(JSON.parse(calls[2].init.body).model, 'gpt-4o-mini');
+});
+
+test('offline circuit breaker in Fallback 1 or Fallback 2 halts later slots and auto-fallback', async () => {
+  installChromeStub(settings({
+    preferredEngine: 'openai',
+    openaiApiKey: 'K',
+    geminiApiKey: 'G',
+    anthropicApiKey: 'A',
+    fallback1Engine: 'offline',
+    fallback2Engine: 'anthropic'
+  }));
+  const calls1 = stubFetch(() => jsonResponse({ error: { message: 'bad model' } }, 404));
+  const r1 = await optimizePrompt(RAW);
+  assert.equal(r1.engine, 'offline');
+  assert.equal(r1.degraded, true);
+  assert.equal(calls1.length, 1);
+
+  installChromeStub(settings({
+    preferredEngine: 'openai',
+    openaiApiKey: 'K',
+    geminiApiKey: 'G',
+    anthropicApiKey: 'A',
+    fallback1Engine: 'anthropic',
+    fallback2Engine: 'offline'
+  }));
+  const calls2 = stubFetch(() => jsonResponse({ error: { message: 'bad model' } }, 404));
+  const r2 = await optimizePrompt(RAW);
+  assert.equal(r2.engine, 'offline');
+  assert.equal(r2.degraded, true);
+  assert.equal(calls2.length, 2);
+  assert.ok(calls2[0].url.includes('api.openai.com'));
+  assert.ok(calls2[1].url.includes('api.anthropic.com'));
+});
+
+test('explicit OmniRoute slot runs keyless when disabled and allowCloudFallback blocks cloud while keeping localhost', async () => {
+  // Explicit remote OmniRoute works even when omnirouteEnabled: false and keyless.
+  installChromeStub(settings({
+    preferredEngine: 'nano',
+    allowCloudFallback: true,
+    omnirouteEnabled: false,
+    omnirouteBaseUrl: 'https://gateway.example.com/v1',
+    fallback1Engine: 'omniroute',
+    fallback1Model: 'auto/coding:free'
+  }));
+  const calls1 = stubFetch(() => jsonResponse({ choices: [{ message: { content: 'OmniRoute gateway response' } }] }));
+  const r1 = await optimizePrompt(RAW, { nanoJudge: false, scoreRetry: false });
+  assert.equal(r1.degraded, false);
+  assert.equal(r1.engine, 'omniroute');
+  assert.equal(r1.model, 'auto/coding:free');
+  assert.equal(calls1.length, 1);
+  assert.equal(calls1[0].url, 'https://gateway.example.com/v1/chat/completions');
+  assert.equal(JSON.parse(calls1[0].init.body).model, 'auto/coding:free');
+
+  // allowCloudFallback: false from Nano skips cloud Fallback 1 but allows local OmniRoute Fallback 2.
+  installChromeStub(settings({
+    preferredEngine: 'nano',
+    allowCloudFallback: false,
+    openaiApiKey: 'K',
+    omnirouteBaseUrl: 'http://localhost:20128/v1',
+    omnirouteModel: 'auto',
+    fallback1Engine: 'openai',
+    fallback1Model: 'gpt-4o-mini',
+    fallback2Engine: 'omniroute',
+    fallback2Model: 'auto/fast:free'
+  }));
+  const calls2 = stubFetch(() => jsonResponse({ choices: [{ message: { content: 'Local OmniRoute fallback' } }] }));
+  const r2 = await optimizePrompt(RAW, { nanoJudge: false, scoreRetry: false });
+  assert.equal(r2.degraded, false);
+  assert.equal(r2.engine, 'omniroute');
+  assert.equal(r2.model, 'auto/fast:free');
+  assert.equal(calls2.length, 1);
+  assert.equal(calls2[0].url, 'http://localhost:20128/v1/chat/completions');
+
+  // allowCloudFallback: false from Nano skips explicit remote OmniRoute fallback too.
+  installChromeStub(settings({
+    preferredEngine: 'nano',
+    allowCloudFallback: false,
+    omnirouteBaseUrl: 'https://remote.example.com/v1',
+    fallback1Engine: 'omniroute',
+    fallback1Model: 'auto'
+  }));
+  const calls3 = stubFetch(() => { throw new Error('remote endpoint must not be called'); });
+  const r3 = await optimizePrompt(RAW);
+  assert.equal(r3.degraded, true);
+  assert.equal(r3.engine, 'offline');
+  assert.equal(calls3.length, 0);
+});
+
+test('refinePrompt, clarifyPrompt, and scoreRetry preserve fallback model overrides', async () => {
+  // refinePrompt
+  installChromeStub(settings({
+    preferredEngine: 'openai',
+    openaiApiKey: 'K',
+    openaiModel: 'gpt-4.1',
+    fallback1Engine: 'openai',
+    fallback1Model: 'gpt-4o-mini'
+  }));
+  stubFetch((url, init) => {
+    const body = JSON.parse(init.body);
+    if (body.model === 'gpt-4.1') return jsonResponse({ error: { message: 'failed' } }, 404);
+    return jsonResponse({ choices: [{ message: { content: 'Tighter prompt' } }] });
+  });
+  const ref = await refinePrompt(RAW, { kind: 'shorter', previous: 'Long draft prompt to tighten.' });
+  assert.equal(ref.engine, 'openai');
+  assert.equal(ref.model, 'gpt-4o-mini');
+  assert.equal(ref.requestedModel, 'gpt-4.1');
+  assert.match(ref.fallbackReason, /404/);
+
+  // clarifyPrompt
+  installChromeStub(settings({
+    preferredEngine: 'openai',
+    openaiApiKey: 'K',
+    openaiModel: 'gpt-4.1',
+    anthropicApiKey: 'A',
+    fallback1Engine: 'anthropic',
+    fallback1Model: 'claude-haiku-4-5'
+  }));
+  stubFetch(url => {
+    if (url.includes('api.openai.com')) return jsonResponse({ error: { message: 'down' } }, 404);
+    return jsonResponse({ content: [{ text: 'Who is the audience?\nWhat stack should it use?' }] });
+  });
+  const clar = await clarifyPrompt(RAW);
+  assert.equal(clar.engine, 'anthropic');
+  assert.equal(clar.model, 'claude-haiku-4-5');
+  assert.equal(clar.requestedModel, 'gpt-4.1');
+  assert.equal(clar.questions.length, 2);
+
+  // optimizePrompt with scoreRetry: true retains Fallback 1 model on the quality retry
+  installChromeStub(settings({
+    preferredEngine: 'gemini',
+    geminiApiKey: 'G',
+    openaiApiKey: 'K',
+    openaiModel: 'gpt-4.1',
+    fallback1Engine: 'openai',
+    fallback1Model: 'gpt-4o-mini'
+  }));
+  let openAiAttempt = 0;
+  const retryCalls = stubFetch(url => {
+    if (url.includes('generativelanguage.googleapis.com')) {
+      return jsonResponse({ error: { message: 'gemini unavailable' } }, 404);
+    }
+    openAiAttempt++;
+    if (openAiAttempt === 1) {
+      return jsonResponse({ choices: [{ message: { content: 'Make a site.' } }] });
+    }
+    return jsonResponse({
+      choices: [{
+        message: {
+          content: 'Act as a senior frontend engineer.\nContext: Modern responsive portfolio.\nRequirements:\n1. Use semantic HTML.\n2. Output production code and verify accessibility.'
+        }
+      }]
+    });
+  });
+  const retryStarts = [];
+  const retried = await optimizePrompt(RAW, {
+    nanoJudge: false,
+    scoreRetry: true,
+    onToken: () => {},
+    onStart: (e, m) => retryStarts.push([e, m])
+  });
+  assert.equal(retried.engine, 'openai');
+  assert.equal(retried.model, 'gpt-4o-mini');
+  assert.equal(openAiAttempt, 2);
+  assert.deepEqual(
+    retryCalls.filter(c => c.url.includes('api.openai.com')).map(c => JSON.parse(c.init.body).model),
+    ['gpt-4o-mini', 'gpt-4o-mini']
+  );
+  assert.deepEqual(retryStarts, [
+    ['gemini', 'gemini-3.5-flash-lite'],
+    ['openai', 'gpt-4o-mini'],
+    ['openai', 'gpt-4o-mini']
+  ]);
 });

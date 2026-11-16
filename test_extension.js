@@ -437,6 +437,8 @@ async function runTests() {
                 .some(p => Boolean(settings[p + 'ApiKey'])),
               engine: settings.preferredEngine,
               schemaVersion: settings.schemaVersion,
+              fallback1Engine: settings.fallback1Engine,
+              fallback2Engine: settings.fallback2Engine,
               allowCloudFallback: settings.allowCloudFallback,
               omnirouteEnabled: settings.omnirouteEnabled
             });
@@ -451,7 +453,9 @@ async function runTests() {
     }
     if (
       orKeyCheck.result.value.engine !== 'nano' ||
-      orKeyCheck.result.value.schemaVersion !== 4 ||
+      orKeyCheck.result.value.schemaVersion !== 5 ||
+      orKeyCheck.result.value.fallback1Engine !== '' ||
+      orKeyCheck.result.value.fallback2Engine !== '' ||
       orKeyCheck.result.value.allowCloudFallback !== true ||
       orKeyCheck.result.value.omnirouteEnabled !== false
     ) {
@@ -1027,6 +1031,7 @@ async function runTests() {
           frameworkCards: document.querySelectorAll('.pc-framework').length,
           omniSection: Boolean(document.getElementById('omniroute-base-url') && document.getElementById('omniroute-enabled') && document.getElementById('omniroute-model')),
           openrouterFilter: Boolean(document.getElementById('openrouter-all-models-toggle') && document.getElementById('openrouter-model-filter')),
+          fallbackRows: Boolean(document.getElementById('fallback-1-row') && document.getElementById('fallback-2-row')),
           historyNav: Boolean(document.getElementById('history-nav-link')),
           nanoCheckVisible: checkVisible,
           nanoStatusBefore: statusBefore,
@@ -1045,11 +1050,12 @@ async function runTests() {
       !shellCheck.result.value.themePicker ||
       !shellCheck.result.value.omniSection ||
       !shellCheck.result.value.openrouterFilter ||
+      !shellCheck.result.value.fallbackRows ||
       !shellCheck.result.value.historyNav ||
       !shellCheck.result.value.nanoCheckVisible ||
       !/Unavailable|Disabled by browser flag/i.test(shellCheck.result.value.nanoStatusAfter)
     ) {
-      throw new Error('Options console did not render all expected v4 sections/controls: ' + JSON.stringify(shellCheck.result.value));
+      throw new Error('Options console did not render all expected v5 sections/controls: ' + JSON.stringify(shellCheck.result.value));
     }
 
     // Test dirty tracking, preset bindings, clamping, privacy toggle, and Ctrl+S saving
@@ -1148,6 +1154,156 @@ async function runTests() {
       throw new Error(`Options save/dirty/presets/clamping failed: ${JSON.stringify(sf)}`);
     }
     console.log(`✓ Options dirty tracking, Ctrl+S save, privacy toggle, clamping, and presets verified`);
+
+    // Ordered Fallback 1 & Fallback 2 controls, disabled model rules, presets, custom IDs, hints, and reload persistence
+    const fbFlowRes = await optionsClient.send('Runtime.evaluate', {
+      awaitPromise: true,
+      returnByValue: true,
+      expression: `(async () => {
+        const wait = ms => new Promise(r => setTimeout(r, ms));
+        const $ = id => document.getElementById(id);
+        const pick = async (slotSel, val) => {
+          const sel = document.querySelector(slotSel + ' .pc-select');
+          sel.querySelector('.pc-select__trigger').click();
+          await wait(60);
+          const opt = sel.querySelector('.pc-select__option[data-value="' + val + '"]');
+          if (!opt) throw new Error('Missing option ' + val + ' in ' + slotSel);
+          opt.click();
+          await wait(60);
+        };
+
+        const fb1Input = $('fallback-1-model');
+        const fb2Input = $('fallback-2-model');
+        const fb1Trigger = () => document.querySelector('#fallback-1-preset-slot .pc-select__trigger');
+        const fb2Trigger = () => document.querySelector('#fallback-2-preset-slot .pc-select__trigger');
+        const initialDisabled = fb1Input.disabled && fb2Input.disabled && fb1Trigger().disabled && fb2Trigger().disabled;
+
+        await pick('#fallback-1-engine-slot', 'nano');
+        const nanoDisabled = fb1Input.disabled && fb1Trigger().disabled;
+        const nanoHint = $('fallback-1-hint').textContent;
+
+        await pick('#fallback-1-engine-slot', 'offline');
+        const offlineDisabled = fb1Input.disabled && fb1Trigger().disabled;
+        const offlineFb2Hint = $('fallback-2-hint').textContent;
+
+        await pick('#fallback-1-engine-slot', 'openai');
+        const openaiEnabled = !fb1Input.disabled && !fb1Trigger().disabled;
+        await pick('#fallback-1-preset-slot', 'gpt-4.1');
+        const fb1PresetVal = fb1Input.value;
+
+        await pick('#fallback-2-engine-slot', 'omniroute');
+        const omniEnabled = !fb2Input.disabled && !fb2Trigger().disabled;
+        fb2Input.value = 'custom-omni-route:free';
+        fb2Input.dispatchEvent(new Event('input', { bubbles: true }));
+        const omniCustomPreset = document.querySelector('#fallback-2-preset-slot .pc-select').dataset.value;
+        const omniHint = $('fallback-2-hint').textContent;
+
+        // Save OpenAI preset + OpenRouter custom override so save needs no OmniRoute permission dialog in headless Chromium
+        await pick('#fallback-2-engine-slot', 'openrouter');
+        fb2Input.value = 'meta-llama/custom-fallback-test';
+        fb2Input.dispatchEvent(new Event('input', { bubbles: true }));
+        const orCustomPreset = document.querySelector('#fallback-2-preset-slot .pc-select').dataset.value;
+        $('save-btn').click();
+        await wait(500);
+
+        const stored = await new Promise(r => chrome.storage.local.get('promptcraft_settings', x => r(x.promptcraft_settings)));
+        return {
+          initialDisabled,
+          nanoDisabled,
+          nanoHint,
+          offlineDisabled,
+          offlineFb2Hint,
+          openaiEnabled,
+          fb1PresetVal,
+          omniEnabled,
+          omniCustomPreset,
+          omniHint,
+          orCustomPreset,
+          stored
+        };
+      })()`
+    });
+    const fbf = fbFlowRes.result.value;
+    if (
+      !fbf.initialDisabled ||
+      !fbf.nanoDisabled ||
+      !/Matches Default engine \(Chrome Nano\)/.test(fbf.nanoHint) ||
+      !fbf.offlineDisabled ||
+      !/Skipped because Fallback 1 stops/.test(fbf.offlineFb2Hint) ||
+      !fbf.openaiEnabled ||
+      fbf.fb1PresetVal !== 'gpt-4.1' ||
+      !fbf.omniEnabled ||
+      fbf.omniCustomPreset !== '__custom__' ||
+      !/OmniRoute \(custom-omni-route:free\)/.test(fbf.omniHint) ||
+      fbf.orCustomPreset !== '__custom__' ||
+      fbf.stored.fallback1Engine !== 'openai' ||
+      fbf.stored.fallback1Model !== 'gpt-4.1' ||
+      fbf.stored.fallback2Engine !== 'openrouter' ||
+      fbf.stored.fallback2Model !== 'meta-llama/custom-fallback-test'
+    ) {
+      throw new Error(`Options fallback controls failed: ${JSON.stringify(fbf)}`);
+    }
+
+    // Reload Options to confirm ordered fallback slots + presets restore cleanly from storage, then reset to defaults.
+    await optionsClient.send('Page.reload');
+    for (let r = 0; r < 25; r++) {
+      const state = await optionsClient.send('Runtime.evaluate', {
+        expression: 'document.readyState + "|" + (document.querySelector("#fallback-1-engine-slot .pc-select")?.dataset.value || "")'
+      });
+      if (state.result.value === 'complete|openai') break;
+      await sleep(200);
+    }
+    await sleep(300);
+
+    const fbReloadRes = await optionsClient.send('Runtime.evaluate', {
+      awaitPromise: true,
+      returnByValue: true,
+      expression: `(async () => {
+        const wait = ms => new Promise(r => setTimeout(r, ms));
+        const $ = id => document.getElementById(id);
+        const restored = {
+          fb1Engine: document.querySelector('#fallback-1-engine-slot .pc-select')?.dataset.value,
+          fb1Model: $('fallback-1-model').value,
+          fb1Preset: document.querySelector('#fallback-1-preset-slot .pc-select')?.dataset.value,
+          fb1Disabled: $('fallback-1-model').disabled,
+          fb2Engine: document.querySelector('#fallback-2-engine-slot .pc-select')?.dataset.value,
+          fb2Model: $('fallback-2-model').value,
+          fb2Preset: document.querySelector('#fallback-2-preset-slot .pc-select')?.dataset.value,
+          fb2Disabled: $('fallback-2-model').disabled
+        };
+        const resetSlot = async slotSel => {
+          const sel = document.querySelector(slotSel + ' .pc-select');
+          sel.querySelector('.pc-select__trigger').click();
+          await wait(60);
+          sel.querySelector('.pc-select__option[data-value=""]')?.click();
+          await wait(60);
+        };
+        await resetSlot('#fallback-1-engine-slot');
+        await resetSlot('#fallback-2-engine-slot');
+        $('save-btn').click();
+        await wait(500);
+        const afterReset = await new Promise(r => chrome.storage.local.get('promptcraft_settings', x => r(x.promptcraft_settings)));
+        return { restored, afterReset };
+      })()`
+    });
+    const fbr = fbReloadRes.result.value;
+    if (
+      fbr.restored.fb1Engine !== 'openai' ||
+      fbr.restored.fb1Model !== 'gpt-4.1' ||
+      fbr.restored.fb1Preset !== 'gpt-4.1' ||
+      fbr.restored.fb1Disabled !== false ||
+      fbr.restored.fb2Engine !== 'openrouter' ||
+      fbr.restored.fb2Model !== 'meta-llama/custom-fallback-test' ||
+      fbr.restored.fb2Preset !== '__custom__' ||
+      fbr.restored.fb2Disabled !== false ||
+      fbr.afterReset.fallback1Engine !== '' ||
+      fbr.afterReset.fallback1Model !== '' ||
+      fbr.afterReset.fallback2Engine !== '' ||
+      fbr.afterReset.fallback2Model !== ''
+    ) {
+      throw new Error(`Options fallback reload persistence failed: ${JSON.stringify(fbr)}`);
+    }
+    console.log('✓ Options ordered Fallback 1 & Fallback 2 controls, disabled states, custom IDs, hints, and reload persistence verified');
 
     // Test Adding a New Custom Optimizer Framework
     console.log('\n→ Testing "Add New Optimizer Type" in Options...');

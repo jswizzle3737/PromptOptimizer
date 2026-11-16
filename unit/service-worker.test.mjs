@@ -152,7 +152,7 @@ test('install recreates the menu from scratch and migrates stored settings', asy
   Object.assign(stub, { promptcraft_settings: { schemaVersion: 2, geminiModel: 'gemini-1.5-flash' } });
   await fire('installed', { reason: 'update' });
   assert.deepEqual(names().slice(0, 2), ['removeAll', 'create'], 'removeAll must precede create');
-  assert.equal(stub.promptcraft_settings.schemaVersion, 4);
+  assert.equal(stub.promptcraft_settings.schemaVersion, 5);
   assert.notEqual(stub.promptcraft_settings.geminiModel, 'gemini-1.5-flash');
 });
 
@@ -276,7 +276,7 @@ test('LIBRARY_LABELS reports labels in use with counts', async () => {
 
 test('the in-page design picker writes one field through the worker', async () => {
   Object.assign(stub, {
-    promptcraft_settings: { schemaVersion: 4, theme: 'dark', geminiApiKey: 'keep-me', preferredEngine: 'offline' }
+    promptcraft_settings: { schemaVersion: 5, theme: 'dark', geminiApiKey: 'keep-me', preferredEngine: 'offline' }
   });
   const res = await send({ type: 'SET_THEME', payload: { theme: 'ember' } }, { tab: { id: 3 } });
   assert.equal(res.success, true);
@@ -284,7 +284,7 @@ test('the in-page design picker writes one field through the worker', async () =
   assert.equal(stub.promptcraft_settings.theme, 'ember');
   assert.equal(stub.promptcraft_settings.geminiApiKey, 'keep-me', 'other fields, keys included, are untouched');
   assert.equal(stub.promptcraft_settings.preferredEngine, 'offline');
-  assert.equal(stub.promptcraft_settings.schemaVersion, 4);
+  assert.equal(stub.promptcraft_settings.schemaVersion, 5);
 });
 
 test('a page cannot store an arbitrary or retired design', async () => {
@@ -298,7 +298,7 @@ test('a page cannot store an arbitrary or retired design', async () => {
 test('the in-page design write migrates old settings instead of preserving them stale', async () => {
   Object.assign(stub, { promptcraft_settings: { schemaVersion: 2, geminiModel: 'gemini-1.5-flash', theme: 'dark' } });
   await send({ type: 'SET_THEME', payload: { theme: 'harbor' } }, { tab: { id: 3 } });
-  assert.equal(stub.promptcraft_settings.schemaVersion, 4);
+  assert.equal(stub.promptcraft_settings.schemaVersion, 5);
   assert.notEqual(stub.promptcraft_settings.geminiModel, 'gemini-1.5-flash');
 });
 
@@ -324,7 +324,7 @@ function fakePort(name = 'optimize', sender = {}) {
 const settle = () => new Promise(r => setTimeout(r, 30));
 
 test('optimize port: an offline run posts start-free done with the result', async () => {
-  stub.promptcraft_settings = { schemaVersion: 4, preferredEngine: 'offline' };
+  stub.promptcraft_settings = { schemaVersion: 5, preferredEngine: 'offline' };
   const port = fakePort();
   await fire('connect', port);
   await port.send({ type: 'start', payload: { text: 'write a haiku' } });
@@ -336,7 +336,7 @@ test('optimize port: an offline run posts start-free done with the result', asyn
 });
 
 test('optimize port: cancel aborts an in-flight request and reports cancelled', async () => {
-  stub.promptcraft_settings = { schemaVersion: 4, preferredEngine: 'openai', openaiApiKey: 'K' };
+  stub.promptcraft_settings = { schemaVersion: 5, preferredEngine: 'openai', openaiApiKey: 'K' };
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (url, init) => new Promise((_, reject) =>
     init.signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError'))));
@@ -355,7 +355,7 @@ test('optimize port: cancel aborts an in-flight request and reports cancelled', 
 });
 
 test('optimize port: refine routes to refinePrompt and errors are posted, not thrown', async () => {
-  stub.promptcraft_settings = { schemaVersion: 4, preferredEngine: 'offline' };
+  stub.promptcraft_settings = { schemaVersion: 5, preferredEngine: 'offline' };
   const port = fakePort();
   await fire('connect', port);
   await port.send({ type: 'start', payload: { action: 'refine', kind: 'shorter', previous: 'x', text: 'y' } });
@@ -366,7 +366,7 @@ test('optimize port: refine routes to refinePrompt and errors are posted, not th
 });
 
 test('optimize port: custom refine forwards instruction and records history', async () => {
-  stub.promptcraft_settings = { schemaVersion: 4, preferredEngine: 'omniroute', omnirouteEnabled: true };
+  stub.promptcraft_settings = { schemaVersion: 5, preferredEngine: 'omniroute', omnirouteEnabled: true };
   const originalFetch = globalThis.fetch;
   const requests = [];
   globalThis.fetch = async (url, init) => {
@@ -398,6 +398,48 @@ test('optimize port: custom refine forwards instruction and records history', as
     assert.match(requests[0].url, /^http:\/\/localhost:20128\/v1\/chat\/completions$/);
     assert.match(requests[0].body.messages[1].content, /<instruction>\nOutput YAML only\n<\/instruction>/);
     assert.equal(stub.promptcraft_history.length, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('optimize port: start events carry model ID across ordered same-provider fallback', async () => {
+  stub.promptcraft_settings = {
+    schemaVersion: 5,
+    preferredEngine: 'openai',
+    openaiApiKey: 'K',
+    openaiModel: 'gpt-4.1',
+    fallback1Engine: 'openai',
+    fallback1Model: 'gpt-4o-mini'
+  };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, init) => {
+    const body = JSON.parse(init.body);
+    if (body.model === 'gpt-4.1') {
+      return new Response(JSON.stringify({ error: { message: 'Model overloaded' } }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+    return new Response(JSON.stringify({ choices: [{ message: { content: 'Fallback model rewrite' } }] }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  };
+  try {
+    const port = fakePort();
+    await fire('connect', port);
+    await port.send({ type: 'start', payload: { text: 'write a test plan' } });
+    await settle();
+    const starts = port.posted.filter(m => m.type === 'start');
+    assert.deepEqual(starts.map(s => [s.engine, s.model]), [
+      ['openai', 'gpt-4.1'],
+      ['openai', 'gpt-4o-mini']
+    ]);
+    const done = port.posted.find(m => m.type === 'done');
+    assert.equal(done.data.engine, 'openai');
+    assert.equal(done.data.model, 'gpt-4o-mini');
+    assert.equal(done.data.requestedModel, 'gpt-4.1');
   } finally {
     globalThis.fetch = originalFetch;
   }

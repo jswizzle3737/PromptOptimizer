@@ -24,8 +24,12 @@ test('defaults ship with no credential and Chrome Nano selected', () => {
   assert.equal(DEFAULT_SETTINGS.omnirouteBaseUrl, 'http://localhost:20128/v1');
   assert.equal(DEFAULT_SETTINGS.omnirouteModel, 'auto');
   assert.equal(DEFAULT_SETTINGS.allowCloudFallback, true);
+  assert.equal(DEFAULT_SETTINGS.fallback1Engine, '');
+  assert.equal(DEFAULT_SETTINGS.fallback1Model, '');
+  assert.equal(DEFAULT_SETTINGS.fallback2Engine, '');
+  assert.equal(DEFAULT_SETTINGS.fallback2Model, '');
   assert.equal(DEFAULT_SETTINGS.preferredEngine, 'nano');
-  assert.equal(SCHEMA_VERSION, 4);
+  assert.equal(SCHEMA_VERSION, 5);
 });
 
 test('a fresh install resolves to the new defaults', async () => {
@@ -34,7 +38,11 @@ test('a fresh install resolves to the new defaults', async () => {
   assert.equal(s.preferredEngine, 'nano');
   assert.equal(s.allowCloudFallback, true);
   assert.equal(s.omnirouteEnabled, false);
-  assert.equal(s.schemaVersion, 4);
+  assert.equal(s.fallback1Engine, '');
+  assert.equal(s.fallback1Model, '');
+  assert.equal(s.fallback2Engine, '');
+  assert.equal(s.fallback2Model, '');
+  assert.equal(s.schemaVersion, 5);
 });
 
 test('the retired embedded key is blanked and the engine moves off OpenRouter', async () => {
@@ -96,8 +104,8 @@ test('getSettings persists the migration once', async () => {
     promptcraft_settings: { schemaVersion: 2, preferredEngine: 'openrouter', geminiModel: 'gemini-1.5-flash' }
   });
   const s = await getSettings();
-  assert.equal(s.schemaVersion, 4);
-  assert.equal(data.promptcraft_settings.schemaVersion, 4);
+  assert.equal(s.schemaVersion, 5);
+  assert.equal(data.promptcraft_settings.schemaVersion, 5);
   assert.equal(data.promptcraft_settings.geminiModel, PROVIDER_DEFAULTS.gemini.model);
 });
 
@@ -143,9 +151,9 @@ test('escapeHtml neutralises single quotes as well as the double-quote set', () 
   assert.equal(escapeHtml(undefined), '');
 });
 
-/* ----------------------------------------------------------- v4 migrations */
+/* ----------------------------------------------------------- v4/v5 migrations */
 
-test('v3 to v4 migration normalizes omniroute, allowCloudFallback, and maxHistoryItems', async () => {
+test('v3 to v5 migration normalizes omniroute, allowCloudFallback, and maxHistoryItems', async () => {
   const strict = await migrateSettings({
     schemaVersion: 3,
     allowCloudFallback: false,
@@ -153,7 +161,7 @@ test('v3 to v4 migration normalizes omniroute, allowCloudFallback, and maxHistor
     omnirouteBaseUrl: 'http://localhost:20128/',
     maxHistoryItems: 500
   }, RETIRED_HASHES);
-  assert.equal(strict.schemaVersion, 4);
+  assert.equal(strict.schemaVersion, 5);
   assert.equal(strict.allowCloudFallback, false);
   assert.equal(strict.omnirouteEnabled, true, 'key enables omniroute automatically');
   assert.equal(strict.omnirouteBaseUrl, 'http://localhost:20128/v1');
@@ -169,6 +177,43 @@ test('v3 to v4 migration normalizes omniroute, allowCloudFallback, and maxHistor
   assert.equal(selected.omnirouteBaseUrl, PROVIDER_DEFAULTS.omniroute.baseUrl);
   assert.equal(selected.maxHistoryItems, MAX_HISTORY_MIN);
   assert.equal(selected.allowCloudFallback, true);
+});
+
+test('v4 to v5 migration normalizes ordered fallback slots without forcing omnirouteEnabled', async () => {
+  const normalized = await migrateSettings({
+    schemaVersion: 4,
+    fallback1Engine: ' openai ',
+    fallback1Model: ' gpt-4.1 ',
+    fallback2Engine: 'omniroute',
+    fallback2Model: 'auto/coding:free',
+    omnirouteEnabled: false
+  }, RETIRED_HASHES);
+  assert.equal(normalized.schemaVersion, 5);
+  assert.equal(normalized.fallback1Engine, 'openai');
+  assert.equal(normalized.fallback1Model, 'gpt-4.1');
+  assert.equal(normalized.fallback2Engine, 'omniroute');
+  assert.equal(normalized.fallback2Model, 'auto/coding:free');
+  assert.equal(normalized.omnirouteEnabled, false, 'fallback omniroute slot must not force general auto-fallback on');
+
+  const sanitized = await migrateSettings({
+    schemaVersion: 4,
+    fallback1Engine: 'unknown-engine',
+    fallback1Model: 'orphan-model',
+    fallback2Engine: 'offline',
+    fallback2Model: 'should-clear'
+  }, RETIRED_HASHES);
+  assert.equal(sanitized.fallback1Engine, '');
+  assert.equal(sanitized.fallback1Model, '');
+  assert.equal(sanitized.fallback2Engine, 'offline');
+  assert.equal(sanitized.fallback2Model, '');
+
+  const nanoSlot = await migrateSettings({
+    schemaVersion: 4,
+    fallback1Engine: 'nano',
+    fallback1Model: 'unused-nano-model'
+  }, RETIRED_HASHES);
+  assert.equal(nanoSlot.fallback1Engine, 'nano');
+  assert.equal(nanoSlot.fallback1Model, '');
 });
 
 test('normalizeBaseUrl strips slashes, adds /v1 only when path is empty, and rejects non-HTTP(S)', () => {
@@ -194,7 +239,7 @@ test('clampMaxHistory bounds integers to [5, 100]', () => {
 /* ----------------------------------------------------------- history CRUD */
 
 test('addHistoryEntry deduplicates (original, framework), enforces clamped max, and serializes writes', async () => {
-  installChromeStub({ promptcraft_settings: { schemaVersion: 4, maxHistoryItems: 5 } });
+  installChromeStub({ promptcraft_settings: { schemaVersion: 5, maxHistoryItems: 5 } });
 
   const first = await addHistoryEntry({ original: 'draft A', optimized: 'opt A1', engine: 'offline', framework: 'rtf' });
   await addHistoryEntry({ original: 'draft A', optimized: 'opt A2', engine: 'openai', framework: 'smart-expand' });

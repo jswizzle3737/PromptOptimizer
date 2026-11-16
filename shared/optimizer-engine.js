@@ -5,6 +5,7 @@ import { DEFAULT_CLARIFY_QUESTIONS, parseQuestions } from './clarify.js';
 export { DEFAULT_CLARIFY_QUESTIONS, parseQuestions, withAnswers } from './clarify.js';
 import { getSettings, PROVIDER_DEFAULTS, normalizeBaseUrl } from './storage.js';
 import { DEFAULT_ENGINE } from './engines.js';
+import { isLocalEndpoint } from './secrets.js';
 import { getTargetProfile, buildExplanationChips } from './target-profiles.js';
 import {
   scorePrompt, judgeWithNano, setNanoJudgeBackend, contractTraitIds, rankVariants, NANO_JUDGE_RULE_THRESHOLD
@@ -556,19 +557,26 @@ function parseVariants(text) {
   return out;
 }
 
+function resolveEngineModel(engine, settings, modelOverride = '') {
+  if (engine === 'nano' || engine === 'offline') return '';
+  const override = typeof modelOverride === 'string' ? modelOverride.trim() : '';
+  return override || String(settings[`${engine}Model`] || '').trim() || PROVIDER_DEFAULTS[engine]?.model || '';
+}
+
 /**
  * One engine call, output cleaned. Throws on engine failure.
  * `task` is { systemPrompt, userMessage }; `io` is { signal, onToken }.
  * @returns {Promise<{ text: string, truncated: boolean }>}
  */
-async function runEngineOnce(engine, task, timeoutMs, settings, io = {}) {
+async function runEngineOnce(engine, task, timeoutMs, settings, io = {}, modelOverride = '') {
+  const model = resolveEngineModel(engine, settings, modelOverride);
   const out = engine === 'nano'
     ? await optimizeWithBuiltInNano(task.systemPrompt, task.userMessage, timeoutMs, io)
     : await optimizeWithProvider(engine, {
       systemPrompt: task.systemPrompt,
       userMessage: task.userMessage,
       apiKey: settings[`${engine}ApiKey`],
-      model: settings[`${engine}Model`] || PROVIDER_DEFAULTS[engine].model,
+      model,
       baseUrl: settings[`${engine}BaseUrl`]
     }, timeoutMs, io);
   return { text: cleanModelOutput(out.text), truncated: Boolean(out.truncated) };
@@ -643,7 +651,7 @@ function offlineVariants(trimmed, frameworks, frameworkId, variantCount, targetN
  * framework contract. Throws on engine failure so callers keep their own
  * degraded-result handling.
  */
-async function produceLLMResult({ engine, trimmed, task, timeoutMs, settings, frameworkId, options = {}, io = {} }) {
+async function produceLLMResult({ engine, model = '', trimmed, task, timeoutMs, settings, frameworkId, options = {}, io = {} }) {
   const variantCount = clampVariantCount(options.variantCount);
   const firstTask = variantCount > 1
     ? { ...task, systemPrompt: buildVariantSystemPrompt(task.systemPrompt, variantCount) }
@@ -651,7 +659,7 @@ async function produceLLMResult({ engine, trimmed, task, timeoutMs, settings, fr
   /* Variants arrive as one tagged reply; streaming it would show raw tags. */
   const firstIo = variantCount > 1 ? { signal: io.signal } : io;
 
-  const first = await runEngineOnce(engine, firstTask, timeoutMs, settings, firstIo);
+  const first = await runEngineOnce(engine, firstTask, timeoutMs, settings, firstIo, model);
   let optimizedText = first.text;
   let truncated = first.truncated;
   if (!optimizedText) throw new Error('The engine returned an empty response.');
@@ -688,7 +696,7 @@ async function produceLLMResult({ engine, trimmed, task, timeoutMs, settings, fr
     if (missed) {
       try {
         const streamingRetry = typeof io.onToken === 'function';
-        if (streamingRetry) io.onStart?.(engine);
+        if (streamingRetry) io.onStart?.(engine, model || undefined);
         const retry = await runEngineOnce(
           engine,
           {
@@ -698,7 +706,8 @@ async function produceLLMResult({ engine, trimmed, task, timeoutMs, settings, fr
           },
           timeoutMs,
           settings,
-          streamingRetry ? io : { signal: io.signal }
+          streamingRetry ? io : { signal: io.signal },
+          model
         );
         if (retry.text) {
           const retryScore = await scoreOptimized({
@@ -747,14 +756,14 @@ async function produceLLMResult({ engine, trimmed, task, timeoutMs, settings, fr
  * @param {AbortSignal} [options.signal] - Cancels; rejects with CancelledError.
  * @param {(delta: string) => void} [options.onToken] - Streams the rewrite as it
  *   arrives (single-variant runs only).
- * @param {(engine: string) => void} [options.onStart] - Called when an engine
- *   starts, again for each fallback engine: discard any streamed text then.
+ * @param {(engine: string, model?: string) => void} [options.onStart] - Called when an engine
+ *   starts, again for each fallback engine or model: discard any streamed text then.
  * @param {boolean} [options.scoreRetry] - Retry once when a rewrite scores below
  *   SCORE_RETRY_THRESHOLD. Default: Nano engines only (a cloud retry doubles
  *   latency and cost without asking).
  * @param {boolean} [options.nanoJudge] - Let Gemini Nano also judge the rewrite
  *   when the rule score is uncertain. Default: on for Nano-engine results.
- * @returns {Promise<{optimized, engine, requestedEngine, framework, degraded, degradedReason?, fallbackReason?, truncated?, techniques: Array<{label:string, detail:string}>, target: {id:string, name:string}|null, score: {before: number|null, after: number|null, method: string, missed?: Array}, variants: Array<{label: string, text: string, score: number|null, framework?: string}>}>}
+ * @returns {Promise<{optimized, engine, model?, requestedEngine, requestedModel?, framework, degraded, degradedReason?, fallbackReason?, truncated?, techniques: Array<{label:string, detail:string}>, target: {id:string, name:string}|null, score: {before: number|null, after: number|null, method: string, missed?: Array}, variants: Array<{label: string, text: string, score: number|null, framework?: string}>}>}
  */
 export async function optimizePrompt(rawPrompt, options = {}) {
   const trimmed = (rawPrompt || '').trim();
@@ -829,41 +838,111 @@ export async function optimizePrompt(rawPrompt, options = {}) {
   });
 }
 
-/** Cloud providers with a saved key (or enabled OmniRoute), other than the one that just failed. */
-function fallbackEngines(failed, settings) {
-  if (settings.allowCloudFallback === false) return [];
-  return Object.keys(PROVIDERS).filter(id => {
-    if (id === failed) return false;
-    if (id === 'omniroute') {
-      return Boolean(settings.omnirouteEnabled || String(settings.omnirouteApiKey || '').trim());
-    }
-    return typeof settings[`${id}ApiKey`] === 'string' && settings[`${id}ApiKey`].trim();
-  });
+function isLocalEngine(engine, settings) {
+  if (engine === 'nano' || engine === 'offline') return true;
+  if (engine !== 'omniroute') return false;
+  const base = normalizeBaseUrl(settings.omnirouteBaseUrl || PROVIDER_DEFAULTS.omniroute.baseUrl);
+  return base ? isLocalEndpoint(base) : false;
+}
+
+function targetKey(engine, model) {
+  return engine === 'nano' || engine === 'offline' ? engine : `${engine}::${model}`;
+}
+
+function isProviderReady(engine, settings, { explicit = false } = {}) {
+  if (engine === 'nano') return true;
+  if (!PROVIDERS[engine]) return false;
+  if (engine === 'omniroute') {
+    const base = normalizeBaseUrl(settings.omnirouteBaseUrl || PROVIDER_DEFAULTS.omniroute.baseUrl);
+    if (!base) return false;
+    return explicit || Boolean(settings.omnirouteEnabled || String(settings.omnirouteApiKey || '').trim());
+  }
+  return Boolean(typeof settings[`${engine}ApiKey`] === 'string' && settings[`${engine}ApiKey`].trim());
 }
 
 /**
- * Run `run(engine)`; if it fails, try every other provider the user has a key
- * for. Nano is the default but missing on many machines; without this a saved
- * OpenAI key went unused and every run was offline. Cancellation is never
- * treated as a failure to fall back from. Throws the first engine's error when
- * nothing answers.
+ * Ordered backup targets: explicit Fallback 1 then Fallback 2 (which may reuse the
+ * primary engine with a different model ID, target another provider, or pick `'offline'`
+ * to stop the chain), followed by remaining keyed providers unless stopped.
+ */
+function fallbackTargets(failed, primaryModel, settings) {
+  const seenTargets = new Set([targetKey(failed, primaryModel)]);
+  const seenEngines = new Set([failed]);
+  const targets = [];
+  const primaryLocal = isLocalEngine(failed, settings);
+  const blockCloudFromLocal = settings.allowCloudFallback === false && primaryLocal;
+  let stopAtOffline = false;
+
+  for (const idx of [1, 2]) {
+    const slotEngine = String(settings[`fallback${idx}Engine`] || '').trim();
+    if (!slotEngine) continue;
+    if (slotEngine === 'offline') {
+      stopAtOffline = true;
+      break;
+    }
+    if (slotEngine !== 'nano' && !PROVIDERS[slotEngine]) continue;
+    if (blockCloudFromLocal && !isLocalEngine(slotEngine, settings)) continue;
+    if (!isProviderReady(slotEngine, settings, { explicit: true })) continue;
+
+    const slotModel = resolveEngineModel(slotEngine, settings, settings[`fallback${idx}Model`]);
+    const key = targetKey(slotEngine, slotModel);
+    if (seenTargets.has(key)) continue;
+
+    seenTargets.add(key);
+    seenEngines.add(slotEngine);
+    targets.push({ engine: slotEngine, model: slotModel });
+  }
+
+  if (!stopAtOffline && settings.allowCloudFallback !== false) {
+    for (const id of Object.keys(PROVIDERS)) {
+      if (seenEngines.has(id)) continue;
+      if (!isProviderReady(id, settings, { explicit: false })) continue;
+      const model = resolveEngineModel(id, settings);
+      const key = targetKey(id, model);
+      if (seenTargets.has(key)) continue;
+      seenTargets.add(key);
+      seenEngines.add(id);
+      targets.push({ engine: id, model });
+    }
+  }
+
+  return targets;
+}
+
+/**
+ * Run `run(engine, model)`; if it fails, try ordered Fallback 1 and Fallback 2
+ * targets and then any remaining keyed providers. Cancellation is never treated
+ * as a failure to fall back from. Throws the primary engine's error if nothing answers.
  */
 async function runWithFallback(engine, settings, run, io = {}) {
   if (engine !== 'nano' && !PROVIDERS[engine]) throw new Error(`Unknown engine "${engine}".`);
   const cancelled = () => io.signal?.aborted;
+  const requestedModel = resolveEngineModel(engine, settings);
   try {
-    io.onStart?.(engine);
-    return { engine, value: await run(engine), fallbackReason: null };
+    io.onStart?.(engine, requestedModel || undefined);
+    return {
+      engine,
+      model: requestedModel,
+      requestedModel,
+      value: await run(engine, requestedModel),
+      fallbackReason: null
+    };
   } catch (err) {
     if (cancelled()) throw new CancelledError();
     console.warn(`Primary engine (${engine}) failed:`, err);
-    for (const alt of fallbackEngines(engine, settings)) {
+    for (const alt of fallbackTargets(engine, requestedModel, settings)) {
       try {
-        io.onStart?.(alt);
-        return { engine: alt, value: await run(alt), fallbackReason: err.message };
+        io.onStart?.(alt.engine, alt.model || undefined);
+        return {
+          engine: alt.engine,
+          model: alt.model,
+          requestedModel,
+          value: await run(alt.engine, alt.model),
+          fallbackReason: err.message
+        };
       } catch (altErr) {
         if (cancelled()) throw new CancelledError();
-        console.warn(`Fallback engine (${alt}) failed:`, altErr);
+        console.warn(`Fallback engine (${alt.engine}${alt.model ? `/${alt.model}` : ''}) failed:`, altErr);
       }
     }
     throw err;
@@ -871,7 +950,7 @@ async function runWithFallback(engine, settings, run, io = {}) {
 }
 
 /**
- * Runs the chosen engine, then the other keyed providers (fallbackReason set),
+ * Runs the chosen engine, then ordered/keyed fallbacks (fallbackReason set),
  * then returns the offline template, marked degraded. Cancellation rethrows.
  */
 async function runLLMOptimization({
@@ -879,17 +958,20 @@ async function runLLMOptimization({
   offlineTechniques, engineTechniques, target, options
 }) {
   const io = { signal: options.signal, onToken: options.onToken, onStart: options.onStart };
+  const requestedModel = resolveEngineModel(engine, settings);
   try {
-    const { engine: used, value, fallbackReason } = await runWithFallback(
+    const { engine: used, model: usedModel, value, fallbackReason } = await runWithFallback(
       engine,
       settings,
-      e => produceLLMResult({ engine: e, trimmed, task, timeoutMs, settings, frameworkId, options, io }),
+      (e, m) => produceLLMResult({ engine: e, model: m, trimmed, task, timeoutMs, settings, frameworkId, options, io }),
       io
     );
     return {
       optimized: value.optimizedText,
       engine: used,
+      ...(usedModel && { model: usedModel }),
       requestedEngine: engine,
+      ...(requestedModel && { requestedModel }),
       framework: frameworkId,
       degraded: false,
       ...(fallbackReason && { fallbackReason }),
@@ -909,6 +991,7 @@ async function runLLMOptimization({
       optimized: offlineResult,
       engine: 'offline',
       requestedEngine: engine,
+      ...(requestedModel && { requestedModel }),
       framework: frameworkId,
       degraded: true,
       degradedReason: err.message,
@@ -959,8 +1042,8 @@ export function joinContinuation(base, continuation) {
 /**
  * Apply a one-tap refinement ('shorter' | 'formal' | 'examples' | 'custom') to
  * a previous rewrite, or finish a cut-off one ('continue'). Needs an AI engine;
- * falls back across keyed providers like optimizePrompt, but never to the
- * offline template — a template of a rewrite is not a refinement. Throws instead.
+ * falls back across ordered/keyed providers like optimizePrompt, but never to
+ * the offline template — a template of a rewrite is not a refinement. Throws instead.
  */
 export async function refinePrompt(rawPrompt, options = {}) {
   const { kind } = options;
@@ -1005,8 +1088,8 @@ export async function refinePrompt(rawPrompt, options = {}) {
     };
 
   const io = { signal: options.signal, onToken: options.onToken, onStart: options.onStart };
-  const { engine: used, value, fallbackReason } = await runWithFallback(
-    engine, settings, e => runEngineOnce(e, task, timeoutMs, settings, io), io
+  const { engine: used, model: usedModel, requestedModel, value, fallbackReason } = await runWithFallback(
+    engine, settings, (e, m) => runEngineOnce(e, task, timeoutMs, settings, io, m), io
   );
   if (!value.text) throw new Error('The engine returned an empty response.');
   const optimized = isContinue ? joinContinuation(base, value.text) : value.text;
@@ -1015,7 +1098,9 @@ export async function refinePrompt(rawPrompt, options = {}) {
   return {
     optimized,
     engine: used,
+    ...(usedModel && { model: usedModel }),
     requestedEngine: engine,
+    ...(requestedModel && { requestedModel }),
     framework: frameworkId,
     degraded: false,
     refinement: kind,
@@ -1038,7 +1123,7 @@ const CLARIFY_SYSTEM =
  * Up to three questions whose answers would most improve the draft. Never
  * throws for engine trouble: falls back to DEFAULT_CLARIFY_QUESTIONS, marked
  * degraded. Cancellation rethrows.
- * @returns {Promise<{ questions: string[], engine: string, requestedEngine: string, degraded?: boolean, degradedReason?: string, fallbackReason?: string }>}
+ * @returns {Promise<{ questions: string[], engine: string, model?: string, requestedEngine: string, requestedModel?: string, degraded?: boolean, degradedReason?: string, fallbackReason?: string }>}
  */
 export async function clarifyPrompt(rawPrompt, options = {}) {
   const draft = String(rawPrompt || '').trim();
@@ -1054,14 +1139,22 @@ export async function clarifyPrompt(rawPrompt, options = {}) {
     userMessage: 'Ask your questions about the draft below. Do not rewrite or answer it.\n\n' +
       `<raw_prompt>\n${escapeRawPromptTags(draft)}\n</raw_prompt>`
   };
-  const io = { signal: options.signal };
+  const io = { signal: options.signal, onStart: options.onStart };
+  const requestedModel = resolveEngineModel(engine, settings);
   try {
-    const { engine: used, value, fallbackReason } = await runWithFallback(
-      engine, settings, e => runEngineOnce(e, task, timeoutMs, settings, io), io
+    const { engine: used, model: usedModel, value, fallbackReason } = await runWithFallback(
+      engine, settings, (e, m) => runEngineOnce(e, task, timeoutMs, settings, io, m), io
     );
     const questions = parseQuestions(value.text);
     if (questions.length) {
-      return { questions, engine: used, requestedEngine: engine, ...(fallbackReason && { fallbackReason }) };
+      return {
+        questions,
+        engine: used,
+        ...(usedModel && { model: usedModel }),
+        requestedEngine: engine,
+        ...(requestedModel && { requestedModel }),
+        ...(fallbackReason && { fallbackReason })
+      };
     }
     throw new Error('The engine returned no questions.');
   } catch (err) {
@@ -1070,6 +1163,7 @@ export async function clarifyPrompt(rawPrompt, options = {}) {
       questions: DEFAULT_CLARIFY_QUESTIONS,
       engine: 'offline',
       requestedEngine: engine,
+      ...(requestedModel && { requestedModel }),
       degraded: true,
       degradedReason: err.message
     };

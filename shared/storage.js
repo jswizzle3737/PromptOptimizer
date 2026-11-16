@@ -9,6 +9,7 @@
  */
 
 import { hasIcon } from './icons.js';
+import { isEngine } from './engines.js';
 import { THEMES, DEFAULT_THEME, migrateTheme, LEGACY_THEME_IDS } from './theme-picker.js';
 
 /* Theme metadata lives in theme-picker.js — single source of truth.
@@ -16,7 +17,7 @@ import { THEMES, DEFAULT_THEME, migrateTheme, LEGACY_THEME_IDS } from './theme-p
 export { THEMES, DEFAULT_THEME, migrateTheme, LEGACY_THEME_IDS, hasIcon };
 
 /** Bump when persisted shapes change. Read by `migrateSettings`. */
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 export const MAX_HISTORY_MIN = 5;
 export const MAX_HISTORY_MAX = 100;
@@ -128,6 +129,10 @@ export const DEFAULT_SETTINGS = {
   preferredFramework: 'smart-expand',
   enableFloatingWidget: true,
   allowCloudFallback: true,
+  fallback1Engine: '',
+  fallback1Model: '',
+  fallback2Engine: '',
+  fallback2Model: '',
   geminiApiKey: '',
   geminiModel: PROVIDER_DEFAULTS.gemini.model,
   openaiApiKey: '',
@@ -204,6 +209,19 @@ export async function migrateSettings(stored, retiredKeyHashes = RETIRED_OPENROU
     merged.preferredEngine === 'omniroute'
   );
   merged.maxHistoryItems = clampMaxHistory(merged.maxHistoryItems, DEFAULT_SETTINGS.maxHistoryItems);
+
+  // v4 → v5: Ordered fallback slots (Fallback 1, Fallback 2). Clear unknown
+  // engines and drop any model override paired with '', 'nano', or 'offline'.
+  // Never mutate omnirouteEnabled here — explicit fallback slots handle it directly.
+  for (const idx of [1, 2]) {
+    const eKey = `fallback${idx}Engine`;
+    const mKey = `fallback${idx}Model`;
+    const rawEngine = typeof merged[eKey] === 'string' ? merged[eKey].trim() : '';
+    const validEngine = rawEngine && isEngine(rawEngine) ? rawEngine : '';
+    merged[eKey] = validEngine;
+    const rawModel = typeof merged[mKey] === 'string' ? merged[mKey].trim() : '';
+    merged[mKey] = !validEngine || validEngine === 'nano' || validEngine === 'offline' ? '' : rawModel;
+  }
 
   merged.schemaVersion = SCHEMA_VERSION;
   return merged;

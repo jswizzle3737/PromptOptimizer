@@ -265,6 +265,46 @@ body {
 }
 
 /* --------------------------------------------------------------------------
+   Ordered fallback models
+   -------------------------------------------------------------------------- */
+.pc-fallback-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin-top: var(--space-2);
+}
+
+.pc-fallback-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  background: var(--bg-sunken);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+
+.pc-fallback-row__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.pc-fallback-row__title {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--text-primary);
+}
+
+.pc-fallback-row__grid {
+  display: grid;
+  grid-template-columns: minmax(170px, 1fr) minmax(170px, 1fr) minmax(190px, 1.2fr);
+  gap: var(--space-3);
+  align-items: start;
+}
+
+/* --------------------------------------------------------------------------
    Nano help & download actions
    -------------------------------------------------------------------------- */
 .pc-nano-body {
@@ -436,7 +476,8 @@ body {
     white-space: nowrap;
   }
 
-  .pc-grid-2 { grid-template-columns: minmax(0, 1fr); }
+  .pc-grid-2,
+  .pc-fallback-row__grid { grid-template-columns: minmax(0, 1fr); }
   .pc-field--row { flex-direction: column; align-items: stretch; }
   .pc-theme-slot { width: 100%; }
 

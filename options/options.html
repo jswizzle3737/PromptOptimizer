@@ -121,6 +121,58 @@
           <hr class="pc-divider">
 
           <div class="pc-field">
+            <span class="pc-field__label">Ordered fallback models</span>
+            <span class="pc-field__hint">Tried in order if your chosen engine fails (for example another model on the same provider, or another engine). Leave Model ID override empty to use that provider's default model.</span>
+            <div class="pc-fallback-list">
+              <div class="pc-fallback-row" id="fallback-1-row">
+                <div class="pc-fallback-row__head">
+                  <span class="pc-fallback-row__title">Fallback 1</span>
+                  <span class="pc-badge pc-badge--mono">First backup</span>
+                </div>
+                <div class="pc-fallback-row__grid">
+                  <div class="pc-field">
+                    <label class="pc-field__label" id="fallback-1-engine-label">Engine</label>
+                    <div id="fallback-1-engine-slot"></div>
+                  </div>
+                  <div class="pc-field">
+                    <label class="pc-field__label" id="fallback-1-preset-label">Model preset</label>
+                    <div id="fallback-1-preset-slot"></div>
+                  </div>
+                  <div class="pc-field">
+                    <label class="pc-field__label" for="fallback-1-model">Model ID override</label>
+                    <input type="text" id="fallback-1-model" class="pc-input pc-input--mono" placeholder="Provider default" autocomplete="off">
+                  </div>
+                </div>
+                <span class="pc-field__hint" id="fallback-1-hint"></span>
+              </div>
+
+              <div class="pc-fallback-row" id="fallback-2-row">
+                <div class="pc-fallback-row__head">
+                  <span class="pc-fallback-row__title">Fallback 2</span>
+                  <span class="pc-badge pc-badge--mono">Second backup</span>
+                </div>
+                <div class="pc-fallback-row__grid">
+                  <div class="pc-field">
+                    <label class="pc-field__label" id="fallback-2-engine-label">Engine</label>
+                    <div id="fallback-2-engine-slot"></div>
+                  </div>
+                  <div class="pc-field">
+                    <label class="pc-field__label" id="fallback-2-preset-label">Model preset</label>
+                    <div id="fallback-2-preset-slot"></div>
+                  </div>
+                  <div class="pc-field">
+                    <label class="pc-field__label" for="fallback-2-model">Model ID override</label>
+                    <input type="text" id="fallback-2-model" class="pc-input pc-input--mono" placeholder="Provider default" autocomplete="off">
+                  </div>
+                </div>
+                <span class="pc-field__hint" id="fallback-2-hint"></span>
+              </div>
+            </div>
+          </div>
+
+          <hr class="pc-divider">
+
+          <div class="pc-field">
             <span class="pc-field__label">Privacy &amp; cloud fallback</span>
             <label class="pc-switch">
               <input type="checkbox" id="allow-cloud-fallback">

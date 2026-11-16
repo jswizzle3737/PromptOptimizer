@@ -1091,8 +1091,20 @@
         engineBadge.textContent = ENGINE_LABELS[lastEngine] || lastEngine;
         engineBadge.className = 'pc-badge pc-badge--mono ' +
           (lastData.degraded ? 'pc-badge--warning' : 'pc-badge--accent');
+        if (lastData.fallbackReason) {
+          const requested = ENGINE_LABELS[lastData.requestedEngine] || lastData.requestedEngine;
+          const sameProvider = lastData.engine === lastData.requestedEngine;
+          engineBadge.title = sameProvider && lastData.requestedModel
+            ? `${requested} (${lastData.requestedModel}) failed: ${lastData.fallbackReason}`
+            : `${requested} failed: ${lastData.fallbackReason}`;
+        } else {
+          engineBadge.title = lastData.model
+            ? `${ENGINE_LABELS[lastEngine] || lastEngine} (${lastData.model})`
+            : '';
+        }
         engineBadge.hidden = false;
       } else {
+        engineBadge.title = '';
         engineBadge.hidden = true;
       }
       renderVariantChips();
@@ -1214,6 +1226,7 @@
          presented as the engine the user chose. */
       if (data.degraded) {
         const requested = ENGINE_LABELS[data.requestedEngine] || data.requestedEngine || 'That engine';
+        engineBadge.title = '';
         degradedTitle.textContent = `${requested} unavailable — offline template used`;
         degradedReason.textContent = data.degradedReason
           ? `${data.degradedReason} The output below is a local template, not a model response.`
@@ -1222,18 +1235,35 @@
         setStatus('Offline fallback', 'warning');
         toast('Fell back to the offline template', 'danger');
       } else if (data.fallbackReason) {
-        /* Another configured provider answered for the chosen one. */
+        /* Another configured provider or fallback model answered for the chosen one. */
         const requested = ENGINE_LABELS[data.requestedEngine] || data.requestedEngine;
         const used = ENGINE_LABELS[data.engine] || data.engine;
-        engineBadge.title = `${requested} failed: ${data.fallbackReason}`;
-        setStatus(`Used ${used}`, 'warning');
-        toast(`${requested} unavailable, used ${used}`, 'neutral');
+        const sameProvider = data.engine === data.requestedEngine;
+        if (sameProvider) {
+          engineBadge.title = data.requestedModel && data.model
+            ? `${requested} (${data.requestedModel}) failed: ${data.fallbackReason}`
+            : `${requested} failed: ${data.fallbackReason}`;
+          setStatus(data.model ? `Used ${data.model}` : `Used ${used}`, 'warning');
+          toast(
+            data.model
+              ? `${data.requestedModel || requested} failed, used ${data.model}`
+              : `${requested} fallback used`,
+            'neutral'
+          );
+        } else {
+          engineBadge.title = `${requested} failed: ${data.fallbackReason}`;
+          setStatus(`Used ${used}`, 'warning');
+          toast(
+            `${requested} unavailable, used ${used}${data.model ? ` (${data.model})` : ''}`,
+            'neutral'
+          );
+        }
       } else if (data.truncated) {
-        engineBadge.title = '';
+        engineBadge.title = data.model ? `${ENGINE_LABELS[data.engine] || data.engine} (${data.model})` : '';
         setStatus('Cut off', 'warning');
         toast('The output was cut off. Press Continue to finish it.', 'neutral');
       } else {
-        engineBadge.title = '';
+        engineBadge.title = data.model ? `${ENGINE_LABELS[data.engine] || data.engine} (${data.model})` : '';
         setStatus('Done', 'success');
         toast(data.refinement ? 'Prompt refined' : 'Prompt optimized', 'success');
       }
@@ -1295,11 +1325,13 @@
         let data;
         if (ds?.runClient) {
           currentRun = ds.runClient.startRun(full, {
-            onStart: name => {
+            onStart: (name, model) => {
               streamed = base;
+              const label = ENGINE_LABELS[name] || name;
+              const withModel = model ? `${label} (${model})` : label;
               const engineWait = isOptimize && variantCount > 1
-                ? `${ENGINE_LABELS[name] || name} (${variantCount} variants)…`
-                : `${ENGINE_LABELS[name] || name}…`;
+                ? `${withModel} (${variantCount} variants)…`
+                : `${withModel}…`;
               if (base) {
                 setStatus(engineWait, 'neutral');
                 paint(base);
