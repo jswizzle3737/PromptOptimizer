@@ -66,7 +66,7 @@
         <span class="pc-onboarding__num">3</span>
         <div>
           <span class="pc-onboarding__step-title">Use it inside your AI chat</span>
-          <span class="pc-onboarding__step-desc">On ChatGPT, Claude, Gemini and similar sites a floating Optimize button appears beside the chat box. Alt+O or the right-click menu opens it on any page.</span>
+          <span class="pc-onboarding__step-desc">On ChatGPT, Claude, Gemini and similar sites a floating star button appears beside the chat box to enhance your draft in place. Alt+O or the right-click menu opens the full modal on any page.</span>
         </div>
       </li>
     </ol>
@@ -94,6 +94,9 @@
       <div class="pc-callout__body pc-setup__body">
         <span class="pc-callout__title" id="setup-title">Connect an AI engine</span>
         <span class="pc-callout__text" id="setup-text"></span>
+        <button type="button" class="pc-btn pc-btn--secondary pc-btn--sm" id="setup-check-btn" hidden>
+          <span data-icon="refresh" data-icon-size="13"></span><span>Check Chrome Nano</span>
+        </button>
         <button type="button" class="pc-btn pc-btn--secondary pc-btn--sm" id="setup-download-btn" hidden>
           <span data-icon="cpu" data-icon-size="13"></span><span>Download Chrome's on-device model</span>
         </button>
@@ -115,7 +118,14 @@
     <div class="pc-field">
       <div class="pc-field__row">
         <label class="pc-label" for="raw-prompt">Raw prompt</label>
-        <span class="pc-meter" id="char-counter">0</span>
+        <div class="pc-field__meta">
+          <span class="pc-badge pc-badge--accent pc-badge--mono" id="target-badge" hidden></span>
+          <button type="button" class="pc-icon-btn pc-clear-btn" id="clear-draft-btn"
+                  title="Clear draft and result" aria-label="Clear draft and result" hidden>
+            <span data-icon="reset" data-icon-size="12"></span>
+          </button>
+          <span class="pc-meter" id="char-counter">0</span>
+        </div>
       </div>
       <textarea id="raw-prompt" class="pc-textarea" rows="4"
                 placeholder="Paste a rough idea or draft prompt…"
@@ -176,6 +186,10 @@
           <span class="pc-empty__icon" data-icon="wand" data-icon-size="16"></span>
           <span class="pc-empty__title">No output yet</span>
           <span class="pc-empty__desc">Write a prompt above, then press Optimize.</span>
+        </div>
+        <div class="pc-loading-state" id="loading-state" hidden role="status" aria-live="polite">
+          <span class="pc-spinner"></span>
+          <span id="loading-label">Preparing optimization…</span>
         </div>
         <pre class="pc-output__text" id="result-text" hidden></pre>
       </div>

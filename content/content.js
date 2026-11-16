@@ -1,8 +1,8 @@
 /**
  * PromptOptimizer In-Page Content Script
  *
- * Injects a floating trigger pill and a Shadow DOM optimizer modal into AI chat
- * platforms (ChatGPT, Claude, Gemini, Perplexity, …).
+ * Injects a floating quick-enhance star button and a Shadow DOM optimizer modal
+ * into AI chat platforms (ChatGPT, Claude, Gemini, Perplexity, …).
  *
  * Styling comes from the shared design system (shared/theme.css, base.css,
  * components.css) so the in-page surface is visually identical to the popup and
@@ -50,19 +50,18 @@
     }
     .pc-root *, .pc-root *::before, .pc-root *::after { box-sizing: border-box; }
 
-    .pc-trigger-pill {
+    .pc-star-btn {
       position: fixed;
       pointer-events: auto;
       display: none;
       align-items: center;
-      gap: 7px;
-      height: 28px;
-      padding: 0 12px;
+      justify-content: center;
+      width: 34px;
+      height: 34px;
+      padding: 0;
       background: var(--bg-raised);
-      color: var(--text-primary);
-      font-size: var(--text-xs);
-      font-weight: var(--weight-semibold);
-      border: 1px solid var(--border-default);
+      color: var(--accent-fg);
+      border: 1px solid var(--accent-border);
       border-radius: var(--radius-full);
       box-shadow: var(--shadow-2);
       cursor: pointer;
@@ -71,17 +70,64 @@
       transition:
         background-color var(--dur-fast) var(--ease-standard),
         border-color var(--dur-fast) var(--ease-standard),
+        color var(--dur-fast) var(--ease-standard),
         transform var(--dur-fast) var(--ease-standard),
         box-shadow var(--dur-fast) var(--ease-standard);
     }
-    .pc-trigger-pill:hover {
-      background: var(--bg-hover);
-      border-color: var(--accent-border);
-      transform: translateY(-1px);
+    .pc-star-btn:hover {
+      background: var(--accent-soft);
+      border-color: var(--accent);
+      transform: translateY(-1px) scale(1.04);
       box-shadow: var(--shadow-accent);
     }
-    .pc-trigger-pill:active { transform: translateY(0); }
-    .pc-trigger-pill svg { color: var(--accent-fg); }
+    .pc-star-btn:active { transform: translateY(0) scale(0.98); }
+    .pc-star-btn:focus-visible {
+      outline: 2px solid var(--border-focus);
+      outline-offset: 2px;
+    }
+    .pc-star-btn.is-busy {
+      background: var(--accent-soft);
+      border-color: var(--accent);
+      box-shadow: var(--shadow-accent);
+    }
+    .pc-star-btn.is-busy .pc-spinner {
+      width: 15px;
+      height: 15px;
+    }
+    .pc-star-btn.is-busy svg {
+      animation: pc-star-pulse 1.1s var(--ease-standard) infinite;
+    }
+    .pc-star-btn.is-revert {
+      background: var(--success-soft);
+      border-color: var(--success);
+      color: var(--success-fg);
+    }
+    .pc-star-btn.is-revert:hover {
+      background: var(--success-soft);
+      border-color: var(--success);
+      color: var(--success-fg);
+      box-shadow: var(--shadow-2);
+    }
+    @keyframes pc-star-pulse {
+      0%, 100% { transform: scale(1) rotate(0deg); opacity: 1; }
+      50% { transform: scale(0.84) rotate(22deg); opacity: 0.65; }
+    }
+
+    .pc-toast { z-index: 2147483647; }
+    .pc-toast.has-action { pointer-events: auto; }
+    .pc-toast__action {
+      margin-left: var(--space-1);
+      padding: 2px var(--space-2);
+      border-radius: var(--radius-full);
+      border: 1px solid var(--accent-border);
+      background: var(--accent-soft);
+      color: var(--accent-fg);
+      font-size: var(--text-xs);
+      font-weight: var(--weight-semibold);
+      cursor: pointer;
+      transition: background-color var(--dur-fast) var(--ease-standard);
+    }
+    .pc-toast__action:hover { background: var(--accent-soft-hover); }
 
     .pc-backdrop {
       position: fixed;
@@ -130,6 +176,12 @@
       height: 26px;
       width: auto;
       filter: var(--logo-filter);
+    }
+
+    .pc-modal__title-row {
+      display: flex;
+      align-items: center;
+      gap: var(--space-2);
     }
 
     .pc-modal__title {
@@ -252,6 +304,8 @@
 
     @media (prefers-reduced-motion: reduce) {
       .pc-modal { animation: none; }
+      .pc-star-btn.is-busy svg,
+      .pc-star-btn.is-busy .pc-spinner { animation: none; }
     }
   `;
 
@@ -279,7 +333,7 @@
 
   async function loadModules() {
     try {
-      const [icons, select, themePicker, engines, saveSheet, library, runClient, assist, secrets, clarify] = await Promise.all([
+      const [icons, select, themePicker, engines, saveSheet, library, runClient, assist, secrets, clarify, scorer, targetProfiles] = await Promise.all([
         import(SHARED + 'icons.js'),
         import(SHARED + 'select.js'),
         import(SHARED + 'theme-picker.js'),
@@ -289,9 +343,11 @@
         import(SHARED + 'run-client.js'),
         import(SHARED + 'assist.js'),
         import(SHARED + 'secrets.js'),
-        import(SHARED + 'clarify.js')
+        import(SHARED + 'clarify.js'),
+        import(SHARED + 'scorer.js'),
+        import(SHARED + 'target-profiles.js')
       ]);
-      return { icons, select, themePicker, engines, saveSheet, library, runClient, assist, secrets, clarify };
+      return { icons, select, themePicker, engines, saveSheet, library, runClient, assist, secrets, clarify, scorer, targetProfiles };
     } catch (err) {
       console.warn('[PromptOptimizer] enhanced controls unavailable, falling back:', err);
       return null;
@@ -330,9 +386,9 @@
   }
 
   const TEMPLATE = `
-    <button type="button" class="pc-trigger-pill" id="pc-trigger">
-      <span data-icon="wand" data-icon-size="13"></span>
-      <span>Optimize</span>
+    <button type="button" class="pc-star-btn" id="pc-star-btn" data-state="idle"
+            aria-label="Auto-enhance prompt" title="Auto-enhance draft using your preconfigured setup (Alt+click to fix typos only)">
+      <span data-icon="star" data-icon-size="15"></span>
     </button>
 
     <div class="pc-backdrop" id="pc-backdrop">
@@ -341,7 +397,10 @@
           <div class="pc-modal__brand">
             <img class="pc-modal__logo" src="${LOGO_URL}" alt="">
             <div>
-              <div class="pc-modal__title" id="pc-modal-title">PromptOptimizer</div>
+              <div class="pc-modal__title-row">
+                <div class="pc-modal__title" id="pc-modal-title">PromptOptimizer</div>
+                <span class="pc-badge pc-badge--accent pc-badge--mono" id="pc-target-badge" hidden></span>
+              </div>
               <span class="pc-modal__subtitle">yourlegalaid</span>
             </div>
           </div>
@@ -407,6 +466,9 @@
               <div class="pc-callout__body">
                 <span class="pc-callout__title" id="pc-degraded-title">Offline template used</span>
                 <span class="pc-callout__text" id="pc-degraded-reason"></span>
+                <button type="button" class="pc-btn pc-btn--secondary pc-btn--sm" id="pc-degraded-settings-btn">
+                  <span data-icon="settings" data-icon-size="13"></span><span>Open settings</span>
+                </button>
               </div>
             </div>
             <div class="pc-modal__outbox">
@@ -414,6 +476,10 @@
                 <span class="pc-empty__icon" data-icon="wand" data-icon-size="16"></span>
                 <span class="pc-empty__title">No output yet</span>
                 <span class="pc-empty__desc">Choose a framework, then press Optimize.</span>
+              </div>
+              <div class="pc-loading-state" id="pc-loading-state" hidden role="status" aria-live="polite">
+                <span class="pc-spinner"></span>
+                <span id="pc-loading-label">Preparing optimization…</span>
               </div>
               <pre class="pc-modal__outtext" id="pc-result-text" hidden></pre>
             </div>
@@ -455,9 +521,10 @@
   function wire({ root, ds }) {
     const $ = sel => root.querySelector(sel);
 
-    const trigger = $('#pc-trigger');
+    const starBtn = $('#pc-star-btn');
     const backdrop = $('#pc-backdrop');
     const modal = $('.pc-modal');
+    const targetBadge = $('#pc-target-badge');
     const closeBtn = $('#pc-close-btn');
     const tabsContainer = $('#pc-tabs');
     const themeSlot = $('#pc-theme-slot');
@@ -467,10 +534,13 @@
     const optimizeBtn = $('#pc-optimize-btn');
     const resultText = $('#pc-result-text');
     const placeholder = $('#pc-placeholder');
+    const loadingState = $('#pc-loading-state');
+    const loadingLabel = $('#pc-loading-label');
     const engineBadge = $('#pc-engine-badge');
     const degradedNotice = $('#pc-degraded');
     const degradedTitle = $('#pc-degraded-title');
     const degradedReason = $('#pc-degraded-reason');
+    const degradedSettingsBtn = $('#pc-degraded-settings-btn');
     const techChips = $('#pc-tech-chips');
     const qualityChip = $('#pc-quality-chip');
     const variantChips = $('#pc-variant-chips');
@@ -498,9 +568,30 @@
       .replace(/&/g, '&amp;').replace(/</g, '&lt;')
       .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
+    const QUICK_MAX_CHARS = 8000;
+    const QUICK_REPAIR_MAX_CHARS = 2000;
+    const hasStructuredPromptTokens = s =>
+      /(?:^|[\s(])@file:\S+/i.test(s) ||
+      /(?:^|[\s(])@[A-Za-z][A-Za-z0-9_.-]*(?:\/[^\s,;:!?)\]]+)*(?=$|[\s.,;:!?)\]])/.test(s) ||
+      /(?:^|[\s(])\/[A-Za-z][A-Za-z0-9_:-]{0,31}(?=$|[\s.,;:!?)\]])/.test(s);
+
     let activeFramework = 'smart-expand';
     let latest = '';
     let busy = false;
+    let quickRun = null;
+    let quickRunSeq = 0;
+    let isQuickWriting = false;
+    let quickRepairCached = true;
+    let quickEngineCached = null;
+    const quickState = {
+      mode: 'idle', // 'idle' | 'repairing' | 'enhancing' | 'repaired' | 'enhanced'
+      target: null,
+      originalBackup: null,
+      lastWritten: null,
+      hasAppliedStep1: false,
+      routeKey: location.href
+    };
+    const isQuickBusy = () => quickState.mode === 'repairing' || quickState.mode === 'enhancing';
     /* What the result on screen came from, so a saved prompt records it. */
     let lastOriginal = '';
     let lastEngine = '';
@@ -519,15 +610,68 @@
     const ENGINE_LABELS = ds?.engines?.ENGINE_LABELS || {};
     const DEFAULT_ENGINE = ds?.engines?.DEFAULT_ENGINE || 'nano';
 
-    /* Fields the pill and the modal may attach to or read from. Anything that
-       can hold a credential is excluded: the modal copies a field's value into
-       a box that can be sent to a cloud engine. */
+    const FALLBACK_PROFILES = [
+      { id: 'claude', name: 'Claude', hosts: ['claude.ai'] },
+      { id: 'openai', name: 'ChatGPT', hosts: ['chatgpt.com', 'chat.openai.com'] },
+      { id: 'gemini', name: 'Gemini', hosts: ['gemini.google.com', 'aistudio.google.com'] },
+      { id: 'perplexity', name: 'Perplexity', hosts: ['perplexity.ai'] },
+      { id: 'deepseek', name: 'DeepSeek', hosts: ['chat.deepseek.com'] },
+      { id: 'grok', name: 'Grok', hosts: ['grok.com'] },
+      { id: 'copilot', name: 'Copilot', hosts: ['copilot.microsoft.com'] },
+      { id: 'mistral', name: 'Mistral', hosts: ['chat.mistral.ai'] }
+    ];
+
+    function resolveSiteProfile() {
+      if (ds?.targetProfiles?.getTargetProfile) {
+        return ds.targetProfiles.getTargetProfile(location.hostname);
+      }
+      const cleanHost = String(location.hostname || '').trim().toLowerCase().replace(/^www\./, '');
+      return FALLBACK_PROFILES.find(p => p.hosts.some(h => cleanHost === h || cleanHost.endsWith('.' + h))) || null;
+    }
+
+    function refreshPlatformIdentity() {
+      const profile = resolveSiteProfile();
+      if (profile) {
+        targetBadge.textContent = `For ${profile.name}`;
+        targetBadge.title = `Recognized ${profile.name} (${location.hostname}) — enhancements are tailored for this AI`;
+        targetBadge.hidden = false;
+      } else {
+        targetBadge.hidden = true;
+        targetBadge.textContent = '';
+        targetBadge.title = '';
+      }
+      if (!isQuickBusy() && quickState.mode === 'idle') {
+        const label = profile
+          ? `Auto-enhance draft for ${profile.name} using your preconfigured setup (Alt+click to fix typos only)`
+          : 'Auto-enhance draft using your preconfigured setup (Alt+click to fix typos only)';
+        starBtn.title = label;
+        starBtn.setAttribute('aria-label', label);
+      }
+      return profile;
+    }
+
+    /* Fields the floating star button and modal may attach to or read from.
+       Anything that can hold a credential is excluded: the modal copies a
+       field's value into a box that can be sent to a cloud engine. */
     const SENSITIVE_HINT = /(^|[^a-z])(pass(word|wd)?|otp|cvv|cvc|ccnum|ssn)([^a-z]|$)/i;
     const SENSITIVE_AUTOCOMPLETE = /(^|\s)(cc-[a-z-]+|current-password|new-password|one-time-code)(\s|$)/i;
     const FIELD_SELECTOR = 'textarea, input, [contenteditable]:not([contenteditable="false"])';
 
+    function getDeepActiveElement() {
+      let active = document.activeElement;
+      while (active && active !== host && active.shadowRoot && active.shadowRoot.activeElement) {
+        active = active.shadowRoot.activeElement;
+      }
+      return active;
+    }
+
+    function getDeepEventTarget(e) {
+      const path = typeof e?.composedPath === 'function' ? e.composedPath() : null;
+      return (path && path.length > 0 ? path[0] : null) || e?.target || null;
+    }
+
     function isEligibleField(el) {
-      if (!el || el.nodeType !== 1 || el === host || host.contains(el)) return false;
+      if (!el || el.nodeType !== 1 || el === host || host.contains(el) || el.getRootNode?.() === shadow) return false;
       if (el.disabled || el.readOnly) return false;
 
       const auto = el.getAttribute('autocomplete') || '';
@@ -557,18 +701,38 @@
       // No module: strip the placeholders so no raw text leaks into the UI.
       root.querySelectorAll('[data-icon]').forEach(el => el.remove());
       optimizeBtn.querySelector('span:last-child').textContent = 'Optimize';
+      if (starBtn && !starBtn.querySelector('svg')) starBtn.textContent = '★';
     }
 
     const ICON = (name, size = 14) => (ds?.icons ? ds.icons.icon(name, { size }) : '');
 
     /* Toast ------------------------------------------------------------ */
     let toastTimer;
-    function toast(msg, tone = 'neutral') {
+    function toast(msg, tone = 'neutral', { actionLabel = '', onAction = null, duration = 2400 } = {}) {
       const glyph = { success: 'check', danger: 'alert', neutral: 'info' }[tone] || 'info';
       toastEl.innerHTML = `${ICON(glyph, 13)}<span>${escapeHtml(msg)}</span>`;
+      if (actionLabel && typeof onAction === 'function') {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'pc-toast__action';
+        btn.textContent = actionLabel;
+        btn.addEventListener('mousedown', ev => ev.preventDefault());
+        btn.addEventListener('click', ev => {
+          ev.stopPropagation();
+          clearTimeout(toastTimer);
+          toastEl.classList.remove('is-visible', 'has-action');
+          onAction();
+        });
+        toastEl.appendChild(btn);
+        toastEl.classList.add('has-action');
+      } else {
+        toastEl.classList.remove('has-action');
+      }
       toastEl.classList.add('is-visible');
       clearTimeout(toastTimer);
-      toastTimer = setTimeout(() => toastEl.classList.remove('is-visible'), 2400);
+      toastTimer = setTimeout(() => {
+        toastEl.classList.remove('is-visible', 'has-action');
+      }, duration);
     }
 
     function setStatus(text, tone = 'neutral') {
@@ -662,7 +826,11 @@
       sel.style.width = '100%';
       sel.innerHTML = engineList
         .map(o => `<option value="${escapeHtml(o.value)}">${escapeHtml(o.label)} · ${escapeHtml(o.desc)}</option>`).join('');
-      sel.addEventListener('change', () => { engine = sel.value; });
+      sel.addEventListener('change', () => {
+        engine = sel.value;
+        Promise.resolve(chrome.runtime.sendMessage({ type: 'SET_ENGINE', payload: { engine } }))
+          .catch(err => console.warn('[PromptOptimizer] could not persist the engine:', err));
+      });
       engineSlot.appendChild(sel);
       nativeEngine = sel;
     }
@@ -704,7 +872,6 @@
         }
       });
       variantSlot.appendChild(variantSelect.element);
-      getSettings().then(s => setVariantCount(s.variantCount)).catch(() => {});
     }
 
     /* Storage helpers -------------------------------------------------- */
@@ -715,6 +882,16 @@
       } catch {
         return {};
       }
+    }
+
+    async function getFrameworksList() {
+      try {
+        const stored = await chrome.storage.local.get('promptcraft_frameworks');
+        if (Array.isArray(stored.promptcraft_frameworks) && stored.promptcraft_frameworks.length) {
+          return stored.promptcraft_frameworks;
+        }
+      } catch {}
+      return FALLBACK_FRAMEWORKS;
     }
 
     /* Only the design is written from a page. The service worker owns the write,
@@ -728,16 +905,23 @@
     }
 
     /* Frameworks ------------------------------------------------------- */
-    async function renderFrameworkTabs() {
+    async function renderFrameworkTabs(preloaded) {
       let frameworks = FALLBACK_FRAMEWORKS;
       let settings = {};
-      try {
-        const stored = await chrome.storage.local.get(['promptcraft_frameworks', 'promptcraft_settings']);
-        if (Array.isArray(stored.promptcraft_frameworks) && stored.promptcraft_frameworks.length) {
-          frameworks = stored.promptcraft_frameworks;
+      if (preloaded) {
+        if (Array.isArray(preloaded.frameworks) && preloaded.frameworks.length) {
+          frameworks = preloaded.frameworks;
         }
-        settings = stored.promptcraft_settings || {};
-      } catch {}
+        settings = preloaded.settings || {};
+      } else {
+        try {
+          const stored = await chrome.storage.local.get(['promptcraft_frameworks', 'promptcraft_settings']);
+          if (Array.isArray(stored.promptcraft_frameworks) && stored.promptcraft_frameworks.length) {
+            frameworks = stored.promptcraft_frameworks;
+          }
+          settings = stored.promptcraft_settings || {};
+        } catch {}
+      }
 
       if (!frameworks.some(f => f.id === activeFramework)) {
         activeFramework = settings.preferredFramework || frameworks[0]?.id || 'smart-expand';
@@ -748,12 +932,14 @@
 
       tabsContainer.innerHTML = '';
       frameworks.forEach(fw => {
+        const selected = fw.id === activeFramework;
         const tab = document.createElement('button');
         tab.type = 'button';
         tab.className = 'pc-segmented__item';
         tab.setAttribute('role', 'tab');
         tab.dataset.framework = fw.id;
-        tab.setAttribute('aria-selected', String(fw.id === activeFramework));
+        tab.setAttribute('aria-selected', String(selected));
+        tab.setAttribute('tabindex', selected ? '0' : '-1');
         tab.title = fw.tagline || fw.name;
         tab.innerHTML =
           `<span class="pc-segmented__icon">${ICON(fw.icon, 13)}</span>` +
@@ -762,30 +948,88 @@
       });
     }
 
+    function selectFrameworkTab(id, { focus = false } = {}) {
+      const tabs = [...tabsContainer.querySelectorAll('.pc-segmented__item')];
+      const target = tabs.find(t => t.dataset.framework === id);
+      if (!target) return;
+      tabs.forEach(t => {
+        const selected = t === target;
+        t.setAttribute('aria-selected', String(selected));
+        t.setAttribute('tabindex', selected ? '0' : '-1');
+      });
+      activeFramework = id;
+      if (focus) target.focus();
+      if (!busy && latest && lastFramework && activeFramework !== lastFramework) {
+        setStatus(`Switched to ${target.textContent.trim()} — click Optimize to rewrite`, 'neutral');
+      }
+    }
+
     tabsContainer.addEventListener('click', e => {
       const tab = e.target.closest('.pc-segmented__item');
-      if (!tab) return;
-      tabsContainer.querySelectorAll('.pc-segmented__item')
-        .forEach(t => t.setAttribute('aria-selected', 'false'));
-      tab.setAttribute('aria-selected', 'true');
-      activeFramework = tab.dataset.framework;
-      if (rawInput.value.trim() && latest) runOptimization();
+      if (tab) selectFrameworkTab(tab.dataset.framework);
+    });
+
+    tabsContainer.addEventListener('keydown', e => {
+      const tabs = [...tabsContainer.querySelectorAll('.pc-segmented__item')];
+      if (!tabs.length) return;
+      const idx = tabs.indexOf(shadow.activeElement);
+      if (idx === -1) return;
+      let nextIdx = -1;
+      if (e.key === 'ArrowRight') nextIdx = (idx + 1) % tabs.length;
+      else if (e.key === 'ArrowLeft') nextIdx = (idx - 1 + tabs.length) % tabs.length;
+      else if (e.key === 'Home') nextIdx = 0;
+      else if (e.key === 'End') nextIdx = tabs.length - 1;
+      if (nextIdx === -1) return;
+      e.preventDefault();
+      selectFrameworkTab(tabs[nextIdx].dataset.framework, { focus: true });
     });
 
     /* Open / close ----------------------------------------------------- */
+    let insertCloseTimer = null;
+    let waitTimer = null;
+
+    function stopWaitTimer() {
+      clearInterval(waitTimer);
+      waitTimer = null;
+      loadingState.hidden = true;
+    }
+
+    function startWaitTimer(label, tone = 'neutral') {
+      stopWaitTimer();
+      let sec = 0;
+      loadingLabel.textContent = label;
+      loadingState.hidden = false;
+      waitTimer = setInterval(() => {
+        sec += 1;
+        const text = `${label} (${sec}s)`;
+        loadingLabel.textContent = text;
+        if (busy) setStatus(text, tone);
+      }, 1000);
+    }
+
     async function openModal(initialText = '', autoRun = false, { fromContextMenu = false } = {}) {
       // Capture where focus was before the modal takes it, to hand it back on close.
-      const active = document.activeElement;
+      const active = getDeepActiveElement();
       returnFocusTo = (isFieldLike(active) ? active : null) || currentTargetElement || active;
 
+      if (isQuickBusy()) {
+        cancelQuickRun({ preserveRevert: Boolean(quickState.hasAppliedStep1) });
+      }
       isModalOpen = true;
       backdrop.classList.add('is-open');
-      trigger.style.display = 'none';
+      hideFloatingControls();
+      refreshPlatformIdentity();
 
-      const settings = await getSettings();
+      let stored = {};
+      try {
+        stored = await chrome.storage.local.get(['promptcraft_settings', 'promptcraft_frameworks']);
+      } catch {}
+      const settings = stored.promptcraft_settings || {};
       setTheme(settings.theme || 'dark');
       setEngine(settings.preferredEngine || DEFAULT_ENGINE);
-      await renderFrameworkTabs();
+      setVariantCount(settings.variantCount);
+      contextToggle.checked = Boolean(settings.includePageContext);
+      await renderFrameworkTabs({ frameworks: stored.promptcraft_frameworks, settings });
 
       if (initialText) {
         rawInput.value = initialText;
@@ -810,23 +1054,50 @@
       if (autoRun && rawInput.value.trim()) runOptimization();
     }
 
-    function closeModal() {
+    function closeModal({ insertedTarget = null } = {}) {
+      clearTimeout(insertCloseTimer);
+      insertCloseTimer = null;
+      stopWaitTimer();
+      insertBtn.innerHTML = `${ICON('insert', 13)}<span>Insert</span>`;
       saveSheet?.close();
       libraryPicker?.close();
+      clarifySheet?.close();
       isModalOpen = false;
       backdrop.classList.remove('is-open');
-      if (returnFocusTo?.isConnected) returnFocusTo.focus?.({ preventScroll: true });
+      const focusTarget = (insertedTarget?.isConnected && insertedTarget)
+        || (returnFocusTo?.isConnected && returnFocusTo)
+        || null;
+      if (focusTarget) {
+        focusTarget.focus?.({ preventScroll: true });
+        if (insertedTarget && insertedTarget.isContentEditable) {
+          try {
+            const sel = window.getSelection();
+            const endRange = document.createRange();
+            endRange.selectNodeContents(insertedTarget);
+            endRange.collapse(false);
+            sel.removeAllRanges();
+            sel.addRange(endRange);
+          } catch {}
+        }
+      }
       returnFocusTo = null;
+      if (widgetEnabled) {
+        if (currentTargetElement?.isConnected && isEligibleField(currentTargetElement)) {
+          positionStarBtn(currentTargetElement);
+        } else {
+          autoDetectAndPosition();
+        }
+      }
     }
 
-    closeBtn.addEventListener('click', closeModal);
+    closeBtn.addEventListener('click', () => closeModal());
     backdrop.addEventListener('click', e => {
       if (e.target === backdrop) closeModal();
     });
 
     /* Keyboard inside the dialog: Escape closes, Tab stays within it. Handled on
        the dialog rather than the window so the page never sees these keys. */
-    const FOCUSABLE = 'button:not([disabled]), textarea, input, select, [tabindex]:not([tabindex="-1"])';
+    const FOCUSABLE = 'button:not([disabled]), textarea, input:not([disabled]), select:not([disabled]), [contenteditable="plaintext-only"], [tabindex]:not([tabindex="-1"])';
     backdrop.addEventListener('keydown', e => {
       if (e.key === 'Escape') {
         e.preventDefault();
@@ -857,9 +1128,10 @@
       host.addEventListener(type, e => e.stopPropagation());
     });
 
-    trigger.addEventListener('click', e => {
+    starBtn.addEventListener('mousedown', e => e.preventDefault());
+    starBtn.addEventListener('click', e => {
       e.stopPropagation();
-      openModal(window.getSelection().toString().trim());
+      autoEnhanceChatInput({ altKey: Boolean(e.altKey) });
     });
 
     /* Requests from the service worker: the keyboard command and the context menu. */
@@ -894,8 +1166,18 @@
         : `${ICON('wand', 14)}<span>Optimize</span>`;
       optimizeBtn.title = next && canCancel ? 'Stop this request' : 'Optimize prompt (Ctrl+Enter)';
       askBtn.disabled = next;
+      editableCtrl?.setEditable(Boolean(latest && !next));
       resultActions?.update({ ...actionState(), busy: next });
     }
+
+    degradedSettingsBtn.addEventListener('click', async () => {
+      try {
+        const res = await chrome.runtime.sendMessage({ type: 'OPEN_OPTIONS' });
+        if (res && res.success === false) throw new Error(res.error || 'Could not open settings.');
+      } catch {
+        toast('Open the extension Options page to configure providers', 'neutral');
+      }
+    });
 
     /* Technique chips: what the optimizer added and why. textContent, not
        innerHTML — chip labels come from the result payload over messaging. */
@@ -939,6 +1221,101 @@
       qualityChip.hidden = false;
     }
 
+    /* The "before" half of the quality chip; kept across variant switches and manual edits. */
+    function scoreBefore() {
+      const m = qualityChip.textContent.match(/Quality (\d+)/);
+      return m ? parseInt(m[1], 10) : null;
+    }
+
+    /* Undo history + inline editable result ------------------------------ */
+    const undoStack = ds?.assist?.createUndoStack?.(25) || null;
+
+    function currentSnapshot() {
+      if (!latest) return null;
+      return {
+        text: latest,
+        original: lastOriginal,
+        engine: lastEngine,
+        framework: lastFramework,
+        data: lastData,
+        variants: currentVariants.slice(),
+        scoreBefore: scoreBefore()
+      };
+    }
+
+    function pushUndoSnapshot(snap = currentSnapshot()) {
+      if (snap && undoStack?.push(snap)) {
+        resultActions?.update({ ...actionState(), busy });
+      }
+    }
+
+    function restoreSnapshot(snap, { statusText = 'Reverted change' } = {}) {
+      if (!snap) return;
+      lastData = snap.data || null;
+      latest = snap.text || '';
+      lastOriginal = snap.original || '';
+      lastEngine = snap.engine || '';
+      lastFramework = snap.framework || activeFramework;
+      currentVariants = Array.isArray(snap.variants) ? snap.variants.slice() : [];
+      loadingState.hidden = true;
+      resultText.textContent = latest;
+      resultText.hidden = !latest;
+      placeholder.hidden = Boolean(latest);
+      degradedNotice.hidden = !(lastData?.degraded);
+      if (lastEngine && lastData) {
+        engineBadge.textContent = ENGINE_LABELS[lastEngine] || lastEngine;
+        engineBadge.className = 'pc-badge pc-badge--mono ' +
+          (lastData.degraded ? 'pc-badge--warning' : 'pc-badge--accent');
+        if (lastData.fallbackReason) {
+          const requested = ENGINE_LABELS[lastData.requestedEngine] || lastData.requestedEngine;
+          const sameProvider = lastData.engine === lastData.requestedEngine;
+          engineBadge.title = sameProvider && lastData.requestedModel
+            ? `${requested} (${lastData.requestedModel}) failed: ${lastData.fallbackReason}`
+            : `${requested} failed: ${lastData.fallbackReason}`;
+        } else {
+          engineBadge.title = lastData.model
+            ? `${ENGINE_LABELS[lastEngine] || lastEngine} (${lastData.model})`
+            : '';
+        }
+        engineBadge.hidden = false;
+      } else {
+        engineBadge.title = '';
+        engineBadge.hidden = true;
+      }
+      renderVariantChips();
+      renderTechChips(lastData?.techniques);
+      if (lastData?.score) renderQualityChip(lastData.score, lastOriginal);
+      else if (latest && ds?.scorer) {
+        const rule = ds.scorer.scorePrompt(latest, { traitIds: ds.scorer.contractTraitIds(lastFramework || activeFramework) });
+        renderQualityChip({ before: snap.scoreBefore ?? null, after: rule.score, missed: rule.missed, method: 'rules' }, lastOriginal);
+      } else {
+        qualityChip.hidden = true;
+      }
+      editableCtrl?.setEditable(Boolean(latest && !busy));
+      resultActions?.update({ ...actionState(), busy });
+      if (statusText) setStatus(statusText, 'neutral');
+    }
+
+    const editableCtrl = ds?.assist?.bindEditableResult
+      ? ds.assist.bindEditableResult({
+        element: resultText,
+        onSnapshot: () => pushUndoSnapshot(),
+        onEdit: editedText => {
+          latest = editedText;
+          if (lastData) lastData = { ...lastData, optimized: editedText };
+          if (ds?.scorer) {
+            const rule = ds.scorer.scorePrompt(editedText, {
+              traitIds: ds.scorer.contractTraitIds(lastFramework || activeFramework)
+            });
+            renderQualityChip({ before: scoreBefore(), after: rule.score, missed: rule.missed, method: 'rules' }, lastOriginal);
+          }
+          renderVariantChips();
+          resultActions?.update({ ...actionState(), busy });
+          setStatus('Edited', 'neutral');
+        }
+      })
+      : null;
+
     /* Variant chips: ranked alternatives; clicking swaps the result on screen
        (and with it everything downstream: copy, save, insert). */
     function renderVariantChips() {
@@ -956,44 +1333,52 @@
         btn.title = `Use this variant (quality ${variant.score ?? 'n/a'}/100)`;
         btn.setAttribute('aria-pressed', String(active));
         btn.addEventListener('click', () => {
+          if (variant.text === latest) return;
+          pushUndoSnapshot();
           latest = variant.text;
+          if (lastData) lastData = { ...lastData, optimized: latest };
           resultText.textContent = latest;
           renderVariantChips();
           renderQualityChip({ before: scoreBefore(), after: variant.score, method: 'rules' }, lastOriginal);
+          resultActions?.update({ ...actionState(), busy });
         });
         variantChips.appendChild(btn);
       });
       variantChips.hidden = false;
     }
 
-    /* The "before" half of the quality chip; kept across variant switches. */
-    function scoreBefore() {
-      const m = qualityChip.textContent.match(/Quality (\d+)/);
-      return m ? parseInt(m[1], 10) : null;
-    }
-
-    /* Refine / Continue under the result. Only for model output: a template
-       of a rewrite is not a refinement. */
+    /* Refine / Continue / Undo under the result. Only model output supports
+       refinement; undo restores the previous snapshot whenever available. */
     function actionState() {
+      const hasUndo = Boolean(undoStack?.canUndo());
       return {
-        visible: Boolean(latest && lastData),
+        visible: Boolean(latest && (lastData || hasUndo)),
         truncated: Boolean(lastData?.truncated),
-        canRefine: Boolean(lastData && lastData.engine !== 'offline')
+        canRefine: Boolean(latest && lastData && lastData.engine !== 'offline'),
+        canUndo: hasUndo
       };
     }
 
     const resultActions = ds?.assist && ds?.runClient
       ? ds.assist.createResultActions({
         onRefine: kind => runRequest({ action: 'refine', kind, previous: latest, text: lastOriginal }),
+        onCustomRefine: instruction => runRequest({
+          action: 'refine', kind: 'custom', instruction, previous: latest, text: lastOriginal
+        }),
         onContinue: () => runRequest(
           { action: 'refine', kind: 'continue', previous: latest, text: lastOriginal },
           { base: latest }
-        )
+        ),
+        onUndo: () => {
+          const prev = undoStack?.pop();
+          if (prev) restoreSnapshot(prev);
+        }
       })
       : null;
     if (resultActions) actionsSlot.appendChild(resultActions.element);
 
     function applyResult(data, original) {
+      stopWaitTimer();
       lastData = data;
       latest = data.optimized;
       lastOriginal = original;
@@ -1016,29 +1401,48 @@
          presented as the engine the user chose. */
       if (data.degraded) {
         const requested = ENGINE_LABELS[data.requestedEngine] || data.requestedEngine || 'That engine';
+        engineBadge.title = '';
         degradedTitle.textContent = `${requested} unavailable — offline template used`;
         degradedReason.textContent = data.degradedReason
-          ? `${data.degradedReason} The output below is a local template, not a model response. Add an API key in the toolbar popup or Options for real rewrites.`
+          ? `${data.degradedReason} The output below is a local template, not a model response.`
           : 'The output below is a local template, not a model response.';
         degradedNotice.hidden = false;
         setStatus('Offline fallback', 'warning');
         toast('Fell back to the offline template', 'danger');
       } else if (data.fallbackReason) {
-        /* Another configured provider answered for the chosen one. */
+        /* Another configured provider or fallback model answered for the chosen one. */
         const requested = ENGINE_LABELS[data.requestedEngine] || data.requestedEngine;
         const used = ENGINE_LABELS[data.engine] || data.engine;
-        engineBadge.title = `${requested} failed: ${data.fallbackReason}`;
-        setStatus(`Used ${used}`, 'warning');
-        toast(`${requested} unavailable, used ${used}`, 'neutral');
+        const sameProvider = data.engine === data.requestedEngine;
+        if (sameProvider) {
+          engineBadge.title = data.requestedModel && data.model
+            ? `${requested} (${data.requestedModel}) failed: ${data.fallbackReason}`
+            : `${requested} failed: ${data.fallbackReason}`;
+          setStatus(data.model ? `Used ${data.model}` : `Used ${used}`, 'warning');
+          toast(
+            data.model
+              ? `${data.requestedModel || requested} failed, used ${data.model}`
+              : `${requested} fallback used`,
+            'neutral'
+          );
+        } else {
+          engineBadge.title = `${requested} failed: ${data.fallbackReason}`;
+          setStatus(`Used ${used}`, 'warning');
+          toast(
+            `${requested} unavailable, used ${used}${data.model ? ` (${data.model})` : ''}`,
+            'neutral'
+          );
+        }
       } else if (data.truncated) {
-        engineBadge.title = '';
+        engineBadge.title = data.model ? `${ENGINE_LABELS[data.engine] || data.engine} (${data.model})` : '';
         setStatus('Cut off', 'warning');
         toast('The output was cut off. Press Continue to finish it.', 'neutral');
       } else {
-        engineBadge.title = '';
+        engineBadge.title = data.model ? `${ENGINE_LABELS[data.engine] || data.engine} (${data.model})` : '';
         setStatus('Done', 'success');
         toast(data.refinement ? 'Prompt refined' : 'Prompt optimized', 'success');
       }
+      editableCtrl?.setEditable(Boolean(latest && !busy));
       resultActions?.update(actionState());
     }
 
@@ -1056,12 +1460,15 @@
     async function runRequest(payload, { base = '' } = {}) {
       if (busy) return;
       const isOptimize = !payload.action || payload.action === 'optimize';
-      const previous = { latest, data: lastData };
+      const preRunSnapshot = currentSnapshot();
       setBusy(true);
       saveSheet?.close(); // the result it was about is being replaced
       clarifySheet?.close();
       secretNotice?.hide();
-      setStatus(isOptimize ? 'Optimizing…' : 'Refining…', 'neutral');
+      const waitLabel = isOptimize && variantCount > 1
+        ? `Generating ${variantCount} variants…`
+        : (isOptimize ? 'Optimizing…' : 'Refining…');
+      setStatus(waitLabel, 'neutral');
       degradedNotice.hidden = true;
       techChips.hidden = true;
       qualityChip.hidden = true;
@@ -1069,11 +1476,18 @@
       resultActions?.update({ visible: false });
       if (isOptimize) {
         currentVariants = [];
-        if (!base) { resultText.hidden = true; placeholder.hidden = false; }
+        if (!base) {
+          resultText.hidden = true;
+          placeholder.hidden = true;
+          startWaitTimer(waitLabel);
+        }
+      } else if (!base) {
+        startWaitTimer(waitLabel);
       }
 
       let streamed = base;
       const paint = text => {
+        stopWaitTimer();
         placeholder.hidden = true;
         resultText.hidden = false;
         resultText.textContent = text;
@@ -1086,14 +1500,32 @@
         let data;
         if (ds?.runClient) {
           currentRun = ds.runClient.startRun(full, {
-            onStart: name => {
+            onStart: (name, model) => {
               streamed = base;
-              setStatus(`${ENGINE_LABELS[name] || name}…`, 'neutral');
-              if (base) paint(base);
+              const label = ENGINE_LABELS[name] || name;
+              const withModel = model ? `${label} (${model})` : label;
+              const engineWait = isOptimize && variantCount > 1
+                ? `${withModel} (${variantCount} variants)…`
+                : `${withModel}…`;
+              if (base) {
+                setStatus(engineWait, 'neutral');
+                paint(base);
+              } else {
+                setStatus(engineWait, 'neutral');
+                startWaitTimer(engineWait);
+              }
             },
             onToken: delta => {
               streamed += delta;
               paint(streamed);
+            },
+            onStatus: info => {
+              if (!busy) return;
+              const waitSec = info?.delayMs ? `${Math.max(1, Math.round(info.delayMs / 1000))}s` : '';
+              const why = info?.status === 429 ? 'Rate limited (429)' : (info?.reason || 'Retrying');
+              const msg = `${why}${waitSec ? `, retrying in ${waitSec}…` : ', retrying…'}`;
+              setStatus(msg, 'warning');
+              if (!streamed) startWaitTimer(msg, 'warning');
             }
           });
           data = await currentRun.promise;
@@ -1102,16 +1534,21 @@
         }
 
         if (!data) {
-          // Cancelled: put back whatever was on screen before.
-          latest = previous.latest;
-          lastData = previous.data;
-          if (latest) { resultText.textContent = latest; resultText.hidden = false; placeholder.hidden = true; }
-          else { resultText.hidden = true; placeholder.hidden = false; }
-          setStatus('Cancelled', 'neutral');
+          stopWaitTimer();
+          if (preRunSnapshot) {
+            restoreSnapshot(preRunSnapshot, { statusText: 'Cancelled' });
+          } else {
+            resultText.hidden = true;
+            placeholder.hidden = false;
+            setStatus('Cancelled', 'neutral');
+          }
           return;
         }
+        if (preRunSnapshot) pushUndoSnapshot(preRunSnapshot);
+        if (payload.kind === 'custom') resultActions?.clearCustomInput?.();
         applyResult(data, isOptimize ? payload.text : lastOriginal);
       } catch (err) {
+        stopWaitTimer();
         if (isOptimize) {
           degradedNotice.hidden = true;
           resultText.hidden = true;
@@ -1120,14 +1557,14 @@
             <span class="pc-empty__icon">${ICON('alert', 16)}</span>
             <span class="pc-empty__title">Optimization failed</span>
             <span class="pc-empty__desc">${escapeHtml(err.message)}</span>`;
-        } else if (previous.latest) {
+        } else if (preRunSnapshot) {
           // A failed refinement leaves the result it was refining untouched.
-          resultText.textContent = previous.latest;
-          resultText.hidden = false;
+          restoreSnapshot(preRunSnapshot, { statusText: '' });
         }
         setStatus('Failed', 'danger');
         toast(err.message, 'danger');
       } finally {
+        stopWaitTimer();
         resultText.classList.remove('is-streaming');
         currentRun = null;
         setBusy(false);
@@ -1136,8 +1573,8 @@
     }
 
     /** Title, address (no query string) and any selection other than the draft. */
-    function pageContext(draft) {
-      if (!contextToggle.checked) return '';
+    function pageContext(draft, enabled = contextToggle.checked) {
+      if (!enabled) return '';
       const selection = window.getSelection().toString().trim();
       const lines = [`Page title: ${document.title}`, `URL: ${location.origin}${location.pathname}`];
       if (selection && selection !== draft.trim()) lines.push(`Selected text:\n${selection.slice(0, 2000)}`);
@@ -1173,6 +1610,412 @@
         runOptimization();
       }
     });
+
+    function setStarVisual(mode, statusHint = '') {
+      quickState.mode = mode;
+      const busyNow = mode === 'repairing' || mode === 'enhancing';
+      const revertNow = mode === 'repaired' || mode === 'enhanced';
+      starBtn.dataset.state = mode;
+      starBtn.classList.toggle('is-busy', busyNow);
+      starBtn.classList.toggle('is-revert', revertNow);
+      starBtn.setAttribute('aria-busy', String(busyNow));
+
+      if (busyNow) {
+        starBtn.innerHTML = '<span class="pc-spinner" aria-hidden="true"></span>';
+        const msg = statusHint || (mode === 'repairing' ? 'Checking typos…' : 'Enhancing draft…');
+        starBtn.title = `${msg} (click to cancel)`;
+        starBtn.setAttribute('aria-label', `${msg} (click to cancel)`);
+      } else if (revertNow) {
+        starBtn.innerHTML = ICON('undo', 15) || '<span aria-hidden="true">↩</span>';
+        const msg = statusHint || (mode === 'repaired'
+          ? 'Typos repaired — click to revert'
+          : 'Prompt enhanced — click to revert to original');
+        starBtn.title = msg;
+        starBtn.setAttribute('aria-label', msg);
+      } else {
+        starBtn.innerHTML = ICON('star', 15) || '<span aria-hidden="true">★</span>';
+        refreshPlatformIdentity();
+      }
+    }
+
+    function resetQuickState() {
+      quickState.target = null;
+      quickState.originalBackup = null;
+      quickState.lastWritten = null;
+      quickState.hasAppliedStep1 = false;
+      quickState.routeKey = location.href;
+      setStarVisual('idle');
+    }
+
+    function writeQuickText(el, text) {
+      if (!el?.isConnected || !isEligibleField(el)) return false;
+      isQuickWriting = true;
+      try {
+        return insertTextIntoElement(el, text);
+      } finally {
+        isQuickWriting = false;
+      }
+    }
+
+    function revertQuickDraft() {
+      if (quickState.originalBackup == null) return false;
+      const undoTarget = (quickState.target?.isConnected && isEligibleField(quickState.target) && quickState.target)
+        || (currentTargetElement?.isConnected && isEligibleField(currentTargetElement) && currentTargetElement)
+        || findChatInput();
+      const backup = quickState.originalBackup;
+      if (undoTarget && writeQuickText(undoTarget, backup)) {
+        currentTargetElement = undoTarget;
+        positionStarBtn(undoTarget);
+        resetQuickState();
+        toast('Restored original draft', 'neutral');
+        return true;
+      }
+      toast('Could not restore original draft', 'danger');
+      return false;
+    }
+
+    function cancelQuickRun({ preserveRevert = false } = {}) {
+      quickRunSeq += 1;
+      const activeRun = quickRun;
+      quickRun = null;
+      activeRun?.cancel?.();
+      if (preserveRevert && quickState.hasAppliedStep1 && quickState.target?.isConnected && getElementValue(quickState.target).trim()) {
+        setStarVisual('repaired', 'Typos repaired — click to revert');
+      } else if (isQuickBusy()) {
+        resetQuickState();
+      }
+    }
+
+    async function runQuickWorker(payload, handlers) {
+      if (ds?.runClient) {
+        quickRun = ds.runClient.startRun(payload, handlers);
+        return await quickRun.promise;
+      }
+      return await sendOnce(payload);
+    }
+
+    function composerChangedByUser(el, expectedNorm) {
+      if (!el?.isConnected || !isEligibleField(el)) return true;
+      return !textsMatchSemantically(getElementValue(el), expectedNorm);
+    }
+
+    function formatQuickRetry(info) {
+      const waitSec = info?.delayMs ? `${Math.max(1, Math.round(info.delayMs / 1000))}s` : '';
+      const why = info?.status === 429 ? 'Rate limited (429)' : (info?.reason || 'Retrying');
+      return `${why}${waitSec ? `, retrying in ${waitSec}…` : ', retrying…'}`;
+    }
+
+    async function autoEnhanceChatInput({ altKey = false } = {}) {
+      if (location.href !== quickState.routeKey) {
+        cancelQuickRun({ preserveRevert: false });
+        resetQuickState();
+      }
+
+      if (isQuickBusy()) {
+        const keepRevert = Boolean(
+          quickState.hasAppliedStep1 &&
+          quickState.target?.isConnected &&
+          getElementValue(quickState.target).trim()
+        );
+        cancelQuickRun({ preserveRevert: keepRevert });
+        toast(keepRevert ? 'Enhancement cancelled — typo fixes kept' : 'Quick enhance cancelled', 'neutral');
+        return;
+      }
+
+      if (quickState.mode === 'repaired' || quickState.mode === 'enhanced') {
+        const activeTarget = quickState.target?.isConnected ? quickState.target : null;
+        const switchedField = currentTargetElement && activeTarget && currentTargetElement !== activeTarget;
+        const liveVal = activeTarget ? getElementValue(activeTarget) : '';
+        if (!liveVal.trim() || switchedField) {
+          resetQuickState();
+        } else {
+          revertQuickDraft();
+          return;
+        }
+      }
+
+      if (busy) return;
+
+      const active = getDeepActiveElement();
+      if (isFieldLike(active) && !isEligibleField(active)) {
+        hideFloatingControls();
+        return;
+      }
+
+      const target = (currentTargetElement?.isConnected && isEligibleField(currentTargetElement) && currentTargetElement)
+        || fieldFrom(active)
+        || findChatInput();
+      if (!target) {
+        toast('Open or focus a chat box first', 'danger');
+        return;
+      }
+
+      const raw = getElementValue(target);
+      const trimmed = raw.trim();
+      if (!trimmed) {
+        toast('Type a prompt in the chat box first', 'neutral');
+        target.focus?.({ preventScroll: true });
+        return;
+      }
+
+      if (trimmed.length > QUICK_MAX_CHARS) {
+        toast(`Draft too long for quick enhance (${trimmed.length}/${QUICK_MAX_CHARS} chars) — use Optimize modal`, 'danger');
+        return;
+      }
+
+      const profile = resolveSiteProfile();
+      const targetHint = profile ? ` for ${profile.name}` : '';
+      const seq = ++quickRunSeq;
+      const snapshot0 = normalizeInsertedText(raw);
+
+      quickState.target = target;
+      quickState.originalBackup = raw;
+      quickState.lastWritten = null;
+      quickState.hasAppliedStep1 = false;
+      quickState.routeKey = location.href;
+      const likelyRepair = altKey || (
+        quickRepairCached &&
+        (quickEngineCached || DEFAULT_ENGINE) !== 'offline' &&
+        trimmed.length <= QUICK_REPAIR_MAX_CHARS &&
+        !hasStructuredPromptTokens(trimmed)
+      );
+      setStarVisual(likelyRepair ? 'repairing' : 'enhancing', likelyRepair ? 'Checking typos…' : `Enhancing draft${targetHint}…`);
+
+      try {
+        const [settings, frameworks] = await Promise.all([getSettings(), getFrameworksList()]);
+        if (seq !== quickRunSeq) return;
+        if (location.href !== quickState.routeKey) { resetQuickState(); return; }
+
+        const preEngine = settings.preferredEngine || DEFAULT_ENGINE;
+        quickEngineCached = preEngine;
+        quickRepairCached = settings.quickRepairEnabled !== false;
+        const preFramework = settings.preferredFramework && frameworks.some(f => f.id === settings.preferredFramework)
+          ? settings.preferredFramework
+          : (frameworks[0]?.id || 'smart-expand');
+
+        if (ds?.secrets) {
+          const warning = ds.secrets.secretWarning(trimmed, preEngine, settings);
+          if (warning && secretAllowedFor !== trimmed) {
+            resetQuickState();
+            toast('Review secret warning before sending', 'danger');
+            await openModal(trimmed);
+            secretNotice?.show(warning);
+            return;
+          }
+        }
+
+        let draftForEnhance = trimmed;
+        let currentExpectedNorm = snapshot0;
+
+        if (altKey) {
+          if (trimmed.length > QUICK_REPAIR_MAX_CHARS) {
+            resetQuickState();
+            toast(`Draft exceeds ${QUICK_REPAIR_MAX_CHARS} chars for typo repair`, 'neutral');
+            return;
+          }
+          if (preEngine === 'offline') {
+            resetQuickState();
+            toast('Typo repair needs an AI engine in Options', 'neutral');
+            return;
+          }
+          setStarVisual('repairing', 'Checking typos…');
+          const rep = await runQuickWorker(
+            { action: 'repair', text: trimmed, engine: preEngine, host: location.hostname },
+            {
+              onStart: (usedEngine, usedModel) => {
+                if (seq !== quickRunSeq) return;
+                const name = ENGINE_LABELS[usedEngine] || usedEngine;
+                const via = usedModel ? `${name} (${usedModel})` : name;
+                setStarVisual('repairing', `Checking typos via ${via}…`);
+              },
+              onStatus: info => {
+                if (seq === quickRunSeq) setStarVisual('repairing', formatQuickRetry(info));
+              }
+            }
+          );
+          if (seq !== quickRunSeq) return;
+          if (!rep || location.href !== quickState.routeKey) {
+            resetQuickState();
+            return;
+          }
+          if (rep.changed && rep.repaired) {
+            const liveTarget = (target.isConnected && isEligibleField(target) && target) || findChatInput();
+            if (!liveTarget || composerChangedByUser(liveTarget, snapshot0)) {
+              resetQuickState();
+              toast('Draft changed while checking typos — skipped update', 'neutral');
+              return;
+            }
+            if (writeQuickText(liveTarget, rep.repaired)) {
+              quickState.target = liveTarget;
+              quickState.lastWritten = normalizeInsertedText(getElementValue(liveTarget));
+              quickState.hasAppliedStep1 = true;
+              currentTargetElement = liveTarget;
+              positionStarBtn(liveTarget);
+              setStarVisual('repaired', 'Typos repaired — click to revert');
+              toast('Typos repaired', 'success', {
+                actionLabel: 'Undo',
+                duration: 6000,
+                onAction: revertQuickDraft
+              });
+            } else {
+              resetQuickState();
+              try { await navigator.clipboard.writeText(rep.repaired); } catch {}
+              toast('Could not update chat box — copied instead', 'danger');
+            }
+          } else {
+            resetQuickState();
+            const reasonMsg = rep.skipped === 'structured_tokens'
+              ? 'Skipped typo repair for @mention or /command prompt'
+              : rep.skipped === 'error'
+                ? 'Could not run typo repair right now'
+                : 'No typos needed fixing';
+            toast(reasonMsg, 'neutral');
+          }
+          return;
+        }
+
+        const shouldRepair = settings.quickRepairEnabled !== false &&
+          preEngine !== 'offline' &&
+          trimmed.length <= QUICK_REPAIR_MAX_CHARS &&
+          !hasStructuredPromptTokens(trimmed);
+
+        if (shouldRepair) {
+          setStarVisual('repairing', 'Checking typos…');
+          try {
+            const rep = await runQuickWorker(
+              { action: 'repair', text: trimmed, engine: preEngine, host: location.hostname },
+              {
+                onStart: (usedEngine, usedModel) => {
+                  if (seq !== quickRunSeq) return;
+                  const name = ENGINE_LABELS[usedEngine] || usedEngine;
+                  const via = usedModel ? `${name} (${usedModel})` : name;
+                  setStarVisual('repairing', `Checking typos via ${via}…`);
+                },
+                onStatus: info => {
+                  if (seq === quickRunSeq) setStarVisual('repairing', formatQuickRetry(info));
+                }
+              }
+            );
+            if (seq !== quickRunSeq) return;
+            if (!rep || location.href !== quickState.routeKey) {
+              resetQuickState();
+              return;
+            }
+            if (rep.changed && rep.repaired) {
+              const step1Target = (target.isConnected && isEligibleField(target) && target) || findChatInput();
+              if (!step1Target || composerChangedByUser(step1Target, snapshot0)) {
+                resetQuickState();
+                toast('Draft changed while checking typos — cancelled', 'neutral');
+                return;
+              }
+              if (writeQuickText(step1Target, rep.repaired)) {
+                quickState.target = step1Target;
+                currentExpectedNorm = normalizeInsertedText(getElementValue(step1Target));
+                quickState.lastWritten = currentExpectedNorm;
+                quickState.hasAppliedStep1 = true;
+                draftForEnhance = rep.repaired;
+                currentTargetElement = step1Target;
+                positionStarBtn(step1Target);
+              }
+            }
+          } catch {
+            // Silent non-blocking fallback so Step 2 still runs unless cancelled or navigated away
+            if (seq !== quickRunSeq) return;
+            if (location.href !== quickState.routeKey) { resetQuickState(); return; }
+          } finally {
+            if (seq === quickRunSeq) quickRun = null;
+          }
+        }
+
+        setStarVisual('enhancing', `Enhancing draft${targetHint}…`);
+        const payload = {
+          action: 'optimize',
+          text: draftForEnhance,
+          engine: preEngine,
+          frameworkId: preFramework,
+          variantCount: 1,
+          context: pageContext(draftForEnhance, Boolean(settings.includePageContext)),
+          host: location.hostname
+        };
+
+        const data = await runQuickWorker(payload, {
+          onStart: (usedEngine, usedModel) => {
+            if (seq !== quickRunSeq) return;
+            const name = ENGINE_LABELS[usedEngine] || usedEngine;
+            const via = usedModel ? `${name} (${usedModel})` : name;
+            setStarVisual('enhancing', `Enhancing${targetHint} via ${via}…`);
+          },
+          onStatus: info => {
+            if (seq === quickRunSeq) setStarVisual('enhancing', formatQuickRetry(info));
+          }
+        });
+
+        if (seq !== quickRunSeq) return;
+        if (location.href !== quickState.routeKey) {
+          resetQuickState();
+          return;
+        }
+        if (!data?.optimized) {
+          if (quickState.hasAppliedStep1 && quickState.target?.isConnected && getElementValue(quickState.target).trim()) {
+            setStarVisual('repaired', 'Typos repaired — click to revert');
+          } else {
+            resetQuickState();
+          }
+          return;
+        }
+
+        const writeTarget = (quickState.target?.isConnected && isEligibleField(quickState.target) && quickState.target)
+          || (target.isConnected && isEligibleField(target) && target)
+          || findChatInput();
+
+        if (!writeTarget || composerChangedByUser(writeTarget, currentExpectedNorm)) {
+          resetQuickState();
+          toast('Draft changed while enhancing — kept your edit', 'neutral');
+          return;
+        }
+
+        if (writeQuickText(writeTarget, data.optimized)) {
+          quickState.target = writeTarget;
+          quickState.lastWritten = normalizeInsertedText(getElementValue(writeTarget));
+          currentTargetElement = writeTarget;
+          positionStarBtn(writeTarget);
+          setStarVisual('enhanced', 'Prompt enhanced — click to revert to original');
+
+          const engineLabel = ENGINE_LABELS[data.engine] || data.engine || '';
+          const msg = data.degraded
+            ? (profile ? `Enhanced for ${profile.name} (offline fallback)` : 'Enhanced with offline fallback')
+            : (profile
+              ? `Enhanced for ${profile.name}${engineLabel ? ` · ${engineLabel}` : ''}`
+              : `Prompt enhanced${engineLabel ? ` · ${engineLabel}` : ''}`);
+          toast(msg, data.degraded ? 'neutral' : 'success', {
+            actionLabel: 'Undo',
+            duration: 6000,
+            onAction: revertQuickDraft
+          });
+        } else {
+          if (quickState.hasAppliedStep1 && quickState.target?.isConnected && getElementValue(quickState.target).trim()) {
+            setStarVisual('repaired', 'Typos repaired — click to revert');
+          } else {
+            resetQuickState();
+          }
+          try { await navigator.clipboard.writeText(data.optimized); } catch {}
+          toast('Could not update chat box — copied instead', 'danger');
+        }
+      } catch (err) {
+        if (seq === quickRunSeq) {
+          if (quickState.hasAppliedStep1 && quickState.target?.isConnected && getElementValue(quickState.target).trim()) {
+            setStarVisual('repaired', 'Typos repaired — click to revert');
+          } else {
+            resetQuickState();
+          }
+          toast(err?.message || 'Quick enhance failed', 'danger');
+        }
+      } finally {
+        if (seq === quickRunSeq) {
+          quickRun = null;
+        }
+      }
+    }
 
     /* Secret warning, Ask me first, page context ------------------------ */
     const secretNotice = ds?.assist
@@ -1231,7 +2074,6 @@
     }
 
     /* Page context is opt-in and remembered; the worker owns the write. */
-    getSettings().then(s => { contextToggle.checked = Boolean(s.includePageContext); }).catch(() => {});
     contextToggle.addEventListener('change', () => {
       Promise.resolve(chrome.runtime.sendMessage({
         type: 'SET_PAGE_CONTEXT', payload: { enabled: contextToggle.checked }
@@ -1248,6 +2090,8 @@
         onClose: () => libraryBtn.setAttribute('aria-pressed', 'false'),
         onUse: (text, entry) => {
           setLibraryOpen(false);
+          pushUndoSnapshot();
+          stopWaitTimer();
           lastData = null;
           latest = text;
           lastOriginal = entry.original || '';
@@ -1262,6 +2106,7 @@
           resultText.textContent = text;
           resultText.hidden = false;
           placeholder.hidden = true;
+          editableCtrl?.setEditable(Boolean(latest && !busy));
           resultActions?.update(actionState());
           setStatus(`Loaded "${entry.title}"`, 'neutral');
           toast('Saved prompt ready to insert', 'success');
@@ -1341,16 +2186,18 @@
         toast('Nothing to insert yet', 'danger');
         return;
       }
-      const valid = currentTargetElement?.isConnected && isEligibleField(currentTargetElement)
+      const target = currentTargetElement?.isConnected && isEligibleField(currentTargetElement)
         ? currentTargetElement
-        : null;
+        : findChatInput();
 
-      if (insertTextIntoElement(valid, latest)) {
+      if (insertTextIntoElement(target, latest)) {
+        if (target) currentTargetElement = target;
         insertBtn.innerHTML = `${ICON('check', 13)}<span>Inserted</span>`;
         toast('Inserted into chat', 'success');
-        setTimeout(() => {
-          closeModal();
-          insertBtn.innerHTML = `${ICON('insert', 13)}<span>Insert</span>`;
+        clearTimeout(insertCloseTimer);
+        insertCloseTimer = setTimeout(() => {
+          insertCloseTimer = null;
+          closeModal({ insertedTarget: target });
         }, 350);
       } else {
         navigator.clipboard.writeText(latest);
@@ -1359,18 +2206,146 @@
     });
 
     /* Element helpers -------------------------------------------------- */
+    const BLOCK_TAGS = new Set([
+      'ADDRESS', 'ARTICLE', 'ASIDE', 'BLOCKQUOTE', 'DD', 'DETAILS', 'DIALOG',
+      'DIV', 'DL', 'DT', 'FIELDSET', 'FIGCAPTION', 'FIGURE', 'FOOTER', 'FORM',
+      'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'HEADER', 'HGROUP', 'HR', 'LI',
+      'MAIN', 'NAV', 'OL', 'P', 'PRE', 'SECTION', 'TABLE', 'TR', 'UL'
+    ]);
+    const IGNORED_CONTENT_TAGS = new Set(['STYLE', 'SCRIPT', 'NOSCRIPT', 'TEMPLATE']);
+
+    /* Reads rich contenteditable elements (Quill, ProseMirror, Lexical, plain
+       div lines) without Chromium's innerText <p>-margin newline inflation. */
+    function readBlockLines(container) {
+      const childNodes = Array.from(container.childNodes);
+      const hasBlockChildren = childNodes.some(n => n.nodeType === 1 && BLOCK_TAGS.has(n.tagName));
+      const lines = [];
+      let inlineBuf = '';
+      let hasInline = false;
+      let endedWithBr = false;
+
+      const flushInline = () => {
+        if (!hasInline) return;
+        let line = inlineBuf;
+        if (endedWithBr && line.endsWith('\n')) {
+          line = line.slice(0, -1);
+        }
+        lines.push(line);
+        inlineBuf = '';
+        hasInline = false;
+        endedWithBr = false;
+      };
+
+      const walkInline = node => {
+        for (const child of node.childNodes) {
+          if (child.nodeType === 3) {
+            const val = child.nodeValue || '';
+            if (hasBlockChildren && !hasInline && /^[ \t]*[\r\n]+[ \t\r\n]*$/.test(val)) {
+              continue;
+            }
+            inlineBuf += val;
+            hasInline = true;
+            endedWithBr = false;
+          } else if (child.nodeType === 1) {
+            if (IGNORED_CONTENT_TAGS.has(child.tagName) || child.hasAttribute('hidden')) continue;
+            if (child.tagName === 'BR') {
+              inlineBuf += '\n';
+              hasInline = true;
+              endedWithBr = true;
+            } else if (BLOCK_TAGS.has(child.tagName)) {
+              flushInline();
+              if (child.tagName === 'HR') {
+                lines.push('');
+              } else {
+                const sub = readBlockLines(child);
+                if (sub.length) {
+                  lines.push(...sub);
+                } else {
+                  lines.push('');
+                }
+              }
+            } else {
+              walkInline(child);
+            }
+          }
+        }
+      };
+
+      walkInline(container);
+      flushInline();
+      return lines;
+    }
+
+    function readContentEditableText(el) {
+      if (!el) return '';
+      const raw = readBlockLines(el).join('\n');
+      return raw.replace(/\r\n?/g, '\n').replace(/\u00a0/g, ' ');
+    }
+
     function getElementValue(el) {
       if (!isEligibleField(el)) return '';
       if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') return el.value;
-      if (el.isContentEditable) return el.innerText || el.textContent;
+      if (el.isContentEditable) return readContentEditableText(el);
       return '';
+    }
+
+    function normalizeInsertedText(str) {
+      if (ds?.targetProfiles?.normalizeEditableText) {
+        return ds.targetProfiles.normalizeEditableText(str);
+      }
+      return String(str ?? '')
+        .replace(/\r\n?/g, '\n')
+        .replace(/\u00a0/g, ' ')
+        .trim();
+    }
+
+    function textsMatchSemantically(actual, expected) {
+      if (ds?.targetProfiles?.editableTextsMatch) {
+        return ds.targetProfiles.editableTextsMatch(actual, expected);
+      }
+      const a = normalizeInsertedText(actual);
+      const b = normalizeInsertedText(expected);
+      if (a === b) return true;
+      if (b.includes('\n') && !a.includes('\n')) return false;
+      const canonical = s => s
+        .split('\n')
+        .map(line => line.replace(/[ \t]+/g, ' ').trim())
+        .join('\n')
+        .replace(/\n{2,}/g, '\n')
+        .trim();
+      return Boolean(b) && canonical(a) === canonical(b);
+    }
+
+    function syncQuillState(el, text) {
+      if (!el?.classList?.contains('ql-editor')) return;
+      const isBlank = !normalizeInsertedText(text);
+      if (isBlank && el.children.length === 1 && el.firstElementChild?.tagName === 'P' &&
+          !el.firstElementChild.textContent && !el.firstElementChild.querySelector('br')) {
+        el.firstElementChild.appendChild(document.createElement('br'));
+      }
+      el.classList.toggle('ql-blank', isBlank);
+    }
+
+    function collapseSelectionToEnd(el, selection) {
+      try {
+        const endRange = document.createRange();
+        const targetNode = el.lastElementChild?.tagName === 'P' ? el.lastElementChild : el;
+        endRange.selectNodeContents(targetNode);
+        endRange.collapse(false);
+        selection.removeAllRanges();
+        selection.addRange(endRange);
+      } catch {}
     }
 
     function insertTextIntoElement(el, text) {
       if (!isEligibleField(el)) el = findChatInput();
       if (!el) return false;
 
-      el.focus();
+      try {
+        el.focus({ preventScroll: true });
+      } catch {
+        el.focus();
+      }
 
       if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
         try {
@@ -1379,7 +2354,7 @@
             : window.HTMLInputElement.prototype;
           Object.getOwnPropertyDescriptor(proto, 'value')?.set?.call(el, text);
         } catch {}
-        el.value = text;
+        if (el.value !== text) el.value = text;
         el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
         el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
         return true;
@@ -1391,50 +2366,392 @@
         range.selectNodeContents(el);
         selection.removeAllRanges();
         selection.addRange(range);
-        // execCommand is tracked by ProseMirror / Lexical / Quill undo stacks.
-        const ok = document.execCommand('insertText', false, text);
-        if (!ok) {
-          el.innerText = text;
-          el.dispatchEvent(new InputEvent('input', {
-            bubbles: true, inputType: 'insertReplacementText'
-          }));
+
+        // 1. execCommand preserves ProseMirror / Lexical / Quill undo stacks when accepted cleanly.
+        let ok = false;
+        try { ok = document.execCommand('insertText', false, text); } catch { ok = false; }
+        if (ok && textsMatchSemantically(getElementValue(el), text)) {
+          syncQuillState(el, text);
+          return true;
         }
+
+        // 2. Synthetic plain-text paste handles rich editors that ignore execCommand.
+        try {
+          const dt = new DataTransfer();
+          dt.setData('text/plain', text);
+          const pasteEvt = new ClipboardEvent('paste', {
+            bubbles: true,
+            cancelable: true,
+            clipboardData: dt
+          });
+          const pasteRange = document.createRange();
+          pasteRange.selectNodeContents(el);
+          selection.removeAllRanges();
+          selection.addRange(pasteRange);
+          el.dispatchEvent(pasteEvt);
+          if (textsMatchSemantically(getElementValue(el), text)) {
+            syncQuillState(el, text);
+            return true;
+          }
+        } catch {}
+
+        // 3. Direct DOM fallback (Trusted Types safe: builds <p> blots without innerHTML).
+        try {
+          el.dispatchEvent(new InputEvent('beforeinput', {
+            bubbles: true,
+            cancelable: true,
+            inputType: 'insertReplacementText',
+            data: text
+          }));
+        } catch {}
+        if (el.classList.contains('ql-editor') || el.classList.contains('ProseMirror')) {
+          const lines = String(text ?? '').replace(/\r\n?/g, '\n').split('\n');
+          const frag = document.createDocumentFragment();
+          for (const line of lines) {
+            const p = document.createElement('p');
+            if (line.length > 0) p.textContent = line;
+            else p.appendChild(document.createElement('br'));
+            frag.appendChild(p);
+          }
+          el.replaceChildren(frag);
+          syncQuillState(el, text);
+        } else {
+          el.innerText = text;
+        }
+        el.dispatchEvent(new InputEvent('input', {
+          bubbles: true,
+          composed: true,
+          inputType: 'insertReplacementText',
+          data: text
+        }));
+        el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+        collapseSelectionToEnd(el, selection);
         return true;
       }
 
       return false;
     }
 
-    /* Trigger positioning ---------------------------------------------- */
-    function positionTrigger(targetEl) {
+    /* Star button positioning ------------------------------------------ */
+    const FALLBACK_INPUT_SELECTORS = [
+      '#prompt-textarea',
+      '[role="textbox"][contenteditable]:not([contenteditable="false"])',
+      'div[contenteditable]:not([contenteditable="false"])',
+      'textarea'
+    ];
+    const FALLBACK_COMPOSER_SELECTORS = [
+      '[data-testid*="composer" i]',
+      '[class*="composer" i]',
+      '.input-area',
+      '.text-input-field',
+      'input-area-v2',
+      'ms-prompt-input',
+      '.prompt-input-wrapper',
+      'fieldset',
+      'form',
+      '[data-testid*="chat-input" i]',
+      'rich-textarea'
+    ];
+
+    function isVisibleElement(el) {
+      if (!el || !el.isConnected) return false;
+      const cs = getComputedStyle(el);
+      if (cs.display === 'none' || cs.visibility === 'hidden' || parseFloat(cs.opacity) === 0) {
+        return false;
+      }
+      const r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0;
+    }
+
+    function getParentAcrossShadow(node) {
+      if (!node) return null;
+      if (node.parentElement) return node.parentElement;
+      const rootNode = node.getRootNode?.();
+      return typeof ShadowRoot === 'function' && rootNode instanceof ShadowRoot ? rootNode.host : null;
+    }
+
+    function closestAcrossShadow(startEl, selector) {
+      let cur = startEl;
+      while (cur) {
+        try {
+          const hit = cur.closest(selector);
+          if (hit) return hit;
+        } catch {}
+        const rootNode = cur.getRootNode?.();
+        cur = typeof ShadowRoot === 'function' && rootNode instanceof ShadowRoot ? rootNode.host : null;
+      }
+      return null;
+    }
+
+    function findComposerAnchor(targetEl) {
+      if (!targetEl || !targetEl.isConnected) return targetEl;
+      const tRect = targetEl.getBoundingClientRect();
+      if (tRect.width === 0 && tRect.height === 0) return targetEl;
+
+      const isReasonableContainer = el => {
+        if (!el || el === document.body || el === document.documentElement || el.tagName === 'MAIN') return false;
+        const cs = getComputedStyle(el);
+        if ((cs.overflowY === 'auto' || cs.overflowY === 'scroll') && el.scrollHeight > el.clientHeight + 40) {
+          return false;
+        }
+        const r = el.getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0) return false;
+        if (r.height > Math.max(tRect.height + 200, 300)) return false;
+        if (r.width > Math.max(tRect.width + 460, tRect.width * 2)) return false;
+        return r.width >= tRect.width - 4 && r.height >= tRect.height - 4;
+      };
+
+      const anchorSelectors = ds?.targetProfiles?.COMPOSER_ANCHOR_SELECTORS || FALLBACK_COMPOSER_SELECTORS;
+      for (const sel of anchorSelectors) {
+        const matched = closestAcrossShadow(targetEl, sel);
+        if (matched && matched !== targetEl && isReasonableContainer(matched)) {
+          return matched;
+        }
+      }
+
+      let best = targetEl;
+      let cur = getParentAcrossShadow(targetEl);
+      for (let depth = 0; cur && depth < 6; depth += 1, cur = getParentAcrossShadow(cur)) {
+        if (cur === document.body || cur === document.documentElement || cur.tagName === 'MAIN') break;
+        if (!isReasonableContainer(cur)) continue;
+        const cs = getComputedStyle(cur);
+        const hasChrome =
+          parseFloat(cs.borderTopWidth) > 0 ||
+          parseFloat(cs.borderRadius) >= 8 ||
+          (cs.backgroundColor && cs.backgroundColor !== 'rgba(0, 0, 0, 0)' && cs.backgroundColor !== 'transparent');
+        if (hasChrome) best = cur;
+      }
+      return best;
+    }
+
+    let targetResizeObserver = null;
+    let observedTarget = null;
+    let observedAnchor = null;
+    let positionRafId = 0;
+    let lastStarRender = null;
+
+    function hideFloatingControls() {
+      if (positionRafId) {
+        cancelAnimationFrame(positionRafId);
+        positionRafId = 0;
+      }
+      lastStarRender = null;
+      starBtn.style.display = 'none';
+    }
+
+    const reposition = () => {
+      if (currentTargetElement && !isModalOpen) positionStarBtn(currentTargetElement);
+    };
+
+    function observeTarget(targetEl, anchorEl) {
+      const nextTarget = targetEl && targetEl.isConnected ? targetEl : null;
+      const nextAnchor = anchorEl && anchorEl.isConnected && anchorEl !== nextTarget ? anchorEl : null;
+      if (nextTarget === observedTarget && nextAnchor === observedAnchor) return;
+      targetResizeObserver?.disconnect();
+      observedTarget = nextTarget;
+      observedAnchor = nextAnchor;
+      if (!observedTarget || typeof ResizeObserver !== 'function') return;
+      try {
+        targetResizeObserver ??= new ResizeObserver(reposition);
+        targetResizeObserver.observe(observedTarget);
+        if (observedAnchor) targetResizeObserver.observe(observedAnchor);
+      } catch {}
+    }
+
+    function collectControlRects(scanRoot, visRect) {
+      if (!scanRoot?.querySelectorAll) return [];
+      const rects = [];
+      let nodes;
+      try {
+        nodes = scanRoot.querySelectorAll('button, [role="button"], [type="submit"]');
+      } catch {
+        return rects;
+      }
+      for (const el of nodes) {
+        if (!isVisibleElement(el) || el === host || host.contains(el)) continue;
+        const r = el.getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0) continue;
+        if (r.height > 96 || r.width > Math.max(visRect.width * 0.7, 240)) continue;
+        rects.push(r);
+      }
+      return rects;
+    }
+
+    function rectOverlapsAny(left, top, size, controlRects, pad = 4) {
+      return controlRects.some(r =>
+        left < r.right + pad &&
+        left + size + pad > r.left &&
+        top < r.bottom + pad &&
+        top + size + pad > r.top
+      );
+    }
+
+    function positionStarBtn(targetEl) {
       if (!targetEl || isModalOpen) return;
       // Nothing shows while focus sits in a field we must not serve (a password
       // box, say) — including when a delayed re-scan fires with it focused.
-      const active = document.activeElement;
-      if (!widgetEnabled || (isFieldLike(active) && !isEligibleField(active))) {
-        trigger.style.display = 'none';
+      const active = getDeepActiveElement();
+      if (!widgetEnabled || !targetEl.isConnected || !isEligibleField(targetEl) || (isFieldLike(active) && !isEligibleField(active))) {
+        hideFloatingControls();
+        return;
+      }
+      const style = getComputedStyle(targetEl);
+      if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity) === 0) {
+        hideFloatingControls();
         return;
       }
       const rect = targetEl.getBoundingClientRect();
-      if (rect.width === 0 && rect.height === 0) return;
+      if ((rect.width === 0 && rect.height === 0) ||
+          rect.bottom <= 0 ||
+          rect.top >= window.innerHeight ||
+          rect.right <= 0 ||
+          rect.left >= window.innerWidth) {
+        hideFloatingControls();
+        return;
+      }
 
-      const top = Math.max(10, rect.top - 36);
-      const left = Math.min(window.innerWidth - 140, Math.max(10, rect.right - 132));
+      const anchorEl = findComposerAnchor(targetEl);
+      observeTarget(targetEl, anchorEl);
+      const anchorRect = anchorEl && anchorEl !== targetEl && isVisibleElement(anchorEl)
+        ? anchorEl.getBoundingClientRect()
+        : null;
+      const visRect = anchorRect &&
+        anchorRect.bottom > 0 &&
+        anchorRect.top < window.innerHeight &&
+        anchorRect.right > 0 &&
+        anchorRect.left < window.innerWidth
+        ? anchorRect
+        : rect;
 
-      requestAnimationFrame(() => {
-        trigger.style.top = `${top}px`;
-        trigger.style.left = `${left}px`;
-        trigger.style.display = 'flex';
+      const starSize = 34;
+      const clampX = x => Math.round(Math.max(8, Math.min(window.innerWidth - starSize - 8, x)));
+      const clampY = y => Math.round(Math.max(8, Math.min(window.innerHeight - starSize - 8, y)));
+
+      const centered = visRect.top + (visRect.height - starSize) / 2;
+      const minTop = visRect.top + 4;
+      const maxTop = Math.max(minTop, visRect.bottom - starSize - 4);
+      const centeredTop = clampY(
+        visRect.height <= starSize + 12 ? centered : Math.max(minTop, Math.min(maxTop, centered))
+      );
+      const insideTop = clampY(
+        visRect.height >= 48 ? visRect.top + 8 : visRect.top + (visRect.height - starSize) / 2
+      );
+
+      const hasRoomRight = (window.innerWidth - visRect.right) >= starSize + 14;
+      const fallbackLeft = hasRoomRight
+        ? clampX(visRect.right + 10)
+        : clampX(visRect.right - starSize - 8);
+      const fallbackTop = hasRoomRight ? centeredTop : insideTop;
+
+      const scanRoot = closestAcrossShadow(anchorEl || targetEl, 'input-area-v2, .input-area, ms-prompt-input, form, fieldset') ||
+        anchorEl ||
+        getParentAcrossShadow(targetEl);
+      const controlRects = collectControlRects(scanRoot, visRect);
+
+      const candidates = [];
+      if (hasRoomRight) {
+        const rightOutside = clampX(visRect.right + 10);
+        candidates.push({ left: rightOutside, top: centeredTop });
+        const blockingRight = controlRects.filter(r =>
+          rightOutside < r.right + 4 && rightOutside + starSize + 4 > r.left &&
+          centeredTop < r.bottom + 4 && centeredTop + starSize + 4 > r.top
+        );
+        if (blockingRight.length) {
+          const clearedRight = Math.round(Math.max(...blockingRight.map(r => r.right)) + 10);
+          if (clearedRight <= window.innerWidth - starSize - 8) {
+            candidates.push({ left: clearedRight, top: centeredTop });
+          }
+        }
+      }
+      const insideRightLeft = clampX(visRect.right - starSize - 8);
+      candidates.push({ left: insideRightLeft, top: insideTop });
+      if (visRect.top >= starSize + 14) {
+        candidates.push({
+          left: clampX(visRect.right - starSize),
+          top: clampY(visRect.top - starSize - 8)
+        });
+      }
+      let shiftLeft = insideRightLeft;
+      for (let i = 0; i < 4; i++) {
+        const blocker = controlRects.find(r =>
+          shiftLeft < r.right + 4 && shiftLeft + starSize + 4 > r.left &&
+          insideTop < r.bottom + 4 && insideTop + starSize + 4 > r.top
+        );
+        if (!blocker) break;
+        const nextLeft = Math.round(blocker.left - starSize - 8);
+        if (nextLeft < visRect.left + 8 || nextLeft >= shiftLeft) break;
+        shiftLeft = clampX(nextLeft);
+        candidates.push({ left: shiftLeft, top: insideTop });
+      }
+
+      const chosen = candidates.find(c => !rectOverlapsAny(c.left, c.top, starSize, controlRects)) ||
+        { left: fallbackLeft, top: fallbackTop };
+
+      if (
+        lastStarRender &&
+        lastStarRender.target === targetEl &&
+        lastStarRender.top === chosen.top &&
+        lastStarRender.left === chosen.left &&
+        lastStarRender.display === 'flex' &&
+        starBtn.style.display === 'flex'
+      ) {
+        return;
+      }
+
+      if (positionRafId) cancelAnimationFrame(positionRafId);
+      positionRafId = requestAnimationFrame(() => {
+        positionRafId = 0;
+        const activeNow = getDeepActiveElement();
+        if (isModalOpen || !widgetEnabled || !targetEl.isConnected || (isFieldLike(activeNow) && !isEligibleField(activeNow))) {
+          return;
+        }
+        starBtn.style.top = `${chosen.top}px`;
+        starBtn.style.left = `${chosen.left}px`;
+        starBtn.style.display = 'flex';
+        lastStarRender = { target: targetEl, top: chosen.top, left: chosen.left, display: 'flex' };
       });
     }
 
-    /** The field the user most plausibly means: the focused one, else the first chat-like box. */
+    function getOpenShadowRoots() {
+      const roots = [];
+      try {
+        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
+        let node;
+        while ((node = walker.nextNode())) {
+          if (node !== host && node.shadowRoot) roots.push(node.shadowRoot);
+        }
+      } catch {}
+      return roots;
+    }
+
+    function findMatchingInputInRoot(rootNode, selectors) {
+      for (const selector of selectors) {
+        let matches = [];
+        try {
+          matches = rootNode.querySelectorAll(selector);
+        } catch {
+          continue;
+        }
+        for (const el of matches) {
+          if (isEligibleField(el) && isVisibleElement(el)) return el;
+        }
+      }
+      return null;
+    }
+
+    /** The field the user most plausibly means: the focused one, else the first visible chat-like box. */
     function findChatInput() {
-      const focused = fieldFrom(document.activeElement);
+      const focused = fieldFrom(getDeepActiveElement());
       if (focused) return focused;
-      for (const selector of ['#prompt-textarea', 'div[contenteditable="true"]', 'textarea']) {
-        const el = document.querySelector(selector);
-        if (isEligibleField(el)) return el;
+      const profile = resolveSiteProfile();
+      const selectors = ds?.targetProfiles?.getChatInputSelectors
+        ? ds.targetProfiles.getChatInputSelectors(profile)
+        : FALLBACK_INPUT_SELECTORS;
+      const lightMatch = findMatchingInputInRoot(document, selectors);
+      if (lightMatch) return lightMatch;
+      for (const sr of getOpenShadowRoots()) {
+        const shadowMatch = findMatchingInputInRoot(sr, selectors);
+        if (shadowMatch) return shadowMatch;
       }
       return null;
     }
@@ -1443,57 +2760,132 @@
       const input = findChatInput();
       if (input) {
         currentTargetElement = input;
-        positionTrigger(input);
+        positionStarBtn(input);
+      } else {
+        hideFloatingControls();
       }
     }
 
-    /* Pages mutate constantly. Re-scan at most every 400 ms, and only when the
-       field we were tracking is gone. */
+    function syncQuickResetWatchers() {
+      if (location.href !== quickState.routeKey) {
+        cancelQuickRun({ preserveRevert: false });
+        if (quickState.mode !== 'idle') resetQuickState();
+        else quickState.routeKey = location.href;
+        return;
+      }
+      if (!isQuickBusy() && quickState.mode !== 'idle') {
+        if (!quickState.target?.isConnected || !getElementValue(quickState.target).trim()) {
+          resetQuickState();
+        }
+      }
+    }
+
+    function scheduleQuickSubmitResetCheck() {
+      if (isQuickBusy() || quickState.mode === 'idle') return;
+      const check = () => syncQuickResetWatchers();
+      setTimeout(check, 80);
+      setTimeout(check, 260);
+    }
+
+    /* Pages mutate constantly. Re-scan at most every 250 ms to discover new
+       composers or keep the star aligned when SPAs shift layout. */
     let scanTimer = 0;
     function scheduleScan() {
       if (scanTimer) return;
       scanTimer = setTimeout(() => {
         scanTimer = 0;
         ensureHost();
-        if (!currentTargetElement?.isConnected) autoDetectAndPosition();
-      }, 400);
+        syncQuickResetWatchers();
+        if (!currentTargetElement?.isConnected || !isEligibleField(currentTargetElement) || !isVisibleElement(currentTargetElement)) {
+          autoDetectAndPosition();
+          return;
+        }
+        if (widgetEnabled && !isModalOpen) {
+          const active = getDeepActiveElement();
+          const activeInsideCurrent = active === currentTargetElement ||
+            (active instanceof Node && currentTargetElement.contains(active));
+          if (!activeInsideCurrent) {
+            const preferred = findChatInput();
+            if (preferred && preferred !== currentTargetElement) {
+              currentTargetElement = preferred;
+            }
+          }
+          positionStarBtn(currentTargetElement);
+        }
+      }, 250);
     }
 
     try {
       new MutationObserver(scheduleScan).observe(document.body, { childList: true, subtree: true });
     } catch {}
 
+    document.addEventListener('input', e => {
+      if (isQuickWriting || isQuickBusy() || quickState.mode === 'idle') return;
+      const evtTarget = getDeepEventTarget(e);
+      const t = quickState.target;
+      if (t && (evtTarget === t || (evtTarget instanceof Element && t.contains(evtTarget)))) {
+        if (!getElementValue(t).trim()) resetQuickState();
+      }
+    }, true);
+
+    document.addEventListener('keydown', e => {
+      if (e.isComposing || e.key !== 'Enter' || e.shiftKey || e.altKey || e.ctrlKey || e.metaKey) return;
+      if (!isQuickBusy() && quickState.mode !== 'idle') {
+        const evtTarget = getDeepEventTarget(e);
+        const active = getDeepActiveElement();
+        const t = quickState.target;
+        if (t && (evtTarget === t || active === t || (evtTarget instanceof Element && t.contains(evtTarget)))) {
+          scheduleQuickSubmitResetCheck();
+        }
+      }
+    }, true);
+
     document.addEventListener('focusin', e => {
-      const el = fieldFrom(e.target);
+      syncQuickResetWatchers();
+      const evtTarget = getDeepEventTarget(e);
+      const el = fieldFrom(evtTarget);
       if (el) {
+        if (!isQuickBusy() && quickState.target && el !== quickState.target) resetQuickState();
         currentTargetElement = el;
-        positionTrigger(el);
-      } else if (isFieldLike(e.target)) {
-        // Focus moved into a field we do not serve (a password box): the pill
-        // must not stay pointing at the previous one.
-        trigger.style.display = 'none';
+        positionStarBtn(el);
+      } else if (isFieldLike(evtTarget)) {
+        // Focus moved into a field we do not serve (a password box): floating
+        // controls must not stay pointing at the previous one.
+        hideFloatingControls();
       }
     }, true);
 
     document.addEventListener('click', e => {
-      const el = fieldFrom(e.target);
+      const evtTarget = getDeepEventTarget(e);
+      if (evtTarget instanceof Element && !host.contains(evtTarget) && !isQuickBusy() && quickState.mode !== 'idle') {
+        if (evtTarget.closest('button, [role="button"], [type="submit"]')) {
+          scheduleQuickSubmitResetCheck();
+        }
+      }
+      const el = fieldFrom(evtTarget);
       if (el) {
+        if (!isQuickBusy() && quickState.target && el !== quickState.target) resetQuickState();
         currentTargetElement = el;
-        positionTrigger(el);
+        positionStarBtn(el);
       }
     }, true);
 
     /* Remember which field a right-click landed on, so the context menu can open
        the modal on it even when nothing is selected. */
     document.addEventListener('contextmenu', e => {
-      lastContextTarget = fieldFrom(e.target);
+      lastContextTarget = fieldFrom(getDeepEventTarget(e));
     }, true);
 
-    const reposition = () => {
-      if (currentTargetElement && !isModalOpen) positionTrigger(currentTargetElement);
-    };
-    window.addEventListener('scroll', reposition, { passive: true });
+    document.addEventListener('transitionend', e => {
+      const evtTarget = getDeepEventTarget(e);
+      if (evtTarget instanceof Element && host.contains(evtTarget)) return;
+      reposition();
+    }, true);
+
+    window.addEventListener('scroll', reposition, { capture: true, passive: true });
     window.addEventListener('resize', reposition, { passive: true });
+    window.addEventListener('popstate', syncQuickResetWatchers);
+    window.addEventListener('hashchange', syncQuickResetWatchers);
 
     chrome.storage.onChanged.addListener((changes, area) => {
       if (area !== 'local') return;
@@ -1501,22 +2893,44 @@
 
       const next = changes.promptcraft_settings?.newValue;
       if (next?.theme) setTheme(next.theme);
-      if (next?.preferredEngine) setEngine(next.preferredEngine);
+      if (next?.preferredEngine) {
+        setEngine(next.preferredEngine);
+        quickEngineCached = next.preferredEngine;
+      }
+      if (next && 'quickRepairEnabled' in next) {
+        quickRepairCached = next.quickRepairEnabled !== false;
+      }
+      if (next?.variantCount != null) setVariantCount(next.variantCount);
+      if (typeof next?.includePageContext === 'boolean') contextToggle.checked = next.includePageContext;
       if (next && (next.enableFloatingWidget !== false) !== widgetEnabled) {
         widgetEnabled = next.enableFloatingWidget !== false;
-        if (widgetEnabled) autoDetectAndPosition();
-        else trigger.style.display = 'none';
+        if (widgetEnabled) {
+          autoDetectAndPosition();
+        } else {
+          cancelQuickRun({ preserveRevert: false });
+          resetQuickState();
+          hideFloatingControls();
+        }
       }
     });
 
     /* Initial state ----------------------------------------------------- */
     (async () => {
-      const settings = await getSettings();
+      let stored = {};
+      try {
+        stored = await chrome.storage.local.get(['promptcraft_settings', 'promptcraft_frameworks']);
+      } catch {}
+      const settings = stored.promptcraft_settings || {};
       widgetEnabled = settings.enableFloatingWidget !== false;
+      quickRepairCached = settings.quickRepairEnabled !== false;
+      quickEngineCached = settings.preferredEngine || DEFAULT_ENGINE;
       setTheme(settings.theme || 'dark');
-      setEngine(settings.preferredEngine || DEFAULT_ENGINE);
+      setEngine(quickEngineCached);
+      setVariantCount(settings.variantCount);
+      contextToggle.checked = Boolean(settings.includePageContext);
       if (settings.preferredFramework) activeFramework = settings.preferredFramework;
-      await renderFrameworkTabs();
+      refreshPlatformIdentity();
+      await renderFrameworkTabs({ frameworks: stored.promptcraft_frameworks, settings });
 
       if (widgetEnabled) {
         autoDetectAndPosition();

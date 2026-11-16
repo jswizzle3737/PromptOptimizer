@@ -27,7 +27,13 @@ resetBehaviour();
 
 const stub = installChromeStub();
 Object.assign(globalThis.chrome, {
-  runtime: { onInstalled: on('installed'), onStartup: on('startup'), onMessage: on('message'), onConnect: on('connect') },
+  runtime: {
+    onInstalled: on('installed'),
+    onStartup: on('startup'),
+    onMessage: on('message'),
+    onConnect: on('connect'),
+    openOptionsPage: async () => { calls.push(['openOptionsPage']); }
+  },
   permissions: {
     onRemoved: on('permRemoved'),
     contains: async q => { calls.push(['contains', q]); return behaviour.contains(q); },
@@ -146,7 +152,7 @@ test('install recreates the menu from scratch and migrates stored settings', asy
   Object.assign(stub, { promptcraft_settings: { schemaVersion: 2, geminiModel: 'gemini-1.5-flash' } });
   await fire('installed', { reason: 'update' });
   assert.deepEqual(names().slice(0, 2), ['removeAll', 'create'], 'removeAll must precede create');
-  assert.equal(stub.promptcraft_settings.schemaVersion, 3);
+  assert.equal(stub.promptcraft_settings.schemaVersion, 5);
   assert.notEqual(stub.promptcraft_settings.geminiModel, 'gemini-1.5-flash');
 });
 
@@ -216,6 +222,24 @@ test('unknown message types get an error, not silence', async () => {
   assert.match(res.error, /unknown/i);
 });
 
+test('OPEN_OPTIONS opens the extension options page from a page request', async () => {
+  const res = await send({ type: 'OPEN_OPTIONS' }, { tab: { id: 3 } });
+  assert.equal(res.success, true);
+  assert.ok(names().includes('openOptionsPage'));
+});
+
+test('SET_ENGINE accepts omniroute (enabling the gateway) and rejects unknown engine ids', async () => {
+  const ok = await send({ type: 'SET_ENGINE', payload: { engine: 'omniroute' } }, { tab: { id: 3 } });
+  assert.equal(ok.success, true);
+  assert.equal(ok.preferredEngine, 'omniroute');
+  assert.equal(stub.promptcraft_settings.preferredEngine, 'omniroute');
+  assert.equal(stub.promptcraft_settings.omnirouteEnabled, true);
+
+  const bad = await send({ type: 'SET_ENGINE', payload: { engine: 'madeup' } }, { tab: { id: 3 } });
+  assert.equal(bad.success, false);
+  assert.match(bad.error, /unknown engine/i);
+});
+
 /* ---------------------------------------------------------- saved prompts */
 
 test('the in-page modal can save a labelled prompt through the worker', async () => {
@@ -252,7 +276,7 @@ test('LIBRARY_LABELS reports labels in use with counts', async () => {
 
 test('the in-page design picker writes one field through the worker', async () => {
   Object.assign(stub, {
-    promptcraft_settings: { schemaVersion: 3, theme: 'dark', geminiApiKey: 'keep-me', preferredEngine: 'offline' }
+    promptcraft_settings: { schemaVersion: 5, theme: 'dark', geminiApiKey: 'keep-me', preferredEngine: 'offline' }
   });
   const res = await send({ type: 'SET_THEME', payload: { theme: 'ember' } }, { tab: { id: 3 } });
   assert.equal(res.success, true);
@@ -260,7 +284,7 @@ test('the in-page design picker writes one field through the worker', async () =
   assert.equal(stub.promptcraft_settings.theme, 'ember');
   assert.equal(stub.promptcraft_settings.geminiApiKey, 'keep-me', 'other fields, keys included, are untouched');
   assert.equal(stub.promptcraft_settings.preferredEngine, 'offline');
-  assert.equal(stub.promptcraft_settings.schemaVersion, 3);
+  assert.equal(stub.promptcraft_settings.schemaVersion, 5);
 });
 
 test('a page cannot store an arbitrary or retired design', async () => {
@@ -274,7 +298,7 @@ test('a page cannot store an arbitrary or retired design', async () => {
 test('the in-page design write migrates old settings instead of preserving them stale', async () => {
   Object.assign(stub, { promptcraft_settings: { schemaVersion: 2, geminiModel: 'gemini-1.5-flash', theme: 'dark' } });
   await send({ type: 'SET_THEME', payload: { theme: 'harbor' } }, { tab: { id: 3 } });
-  assert.equal(stub.promptcraft_settings.schemaVersion, 3);
+  assert.equal(stub.promptcraft_settings.schemaVersion, 5);
   assert.notEqual(stub.promptcraft_settings.geminiModel, 'gemini-1.5-flash');
 });
 
@@ -300,7 +324,7 @@ function fakePort(name = 'optimize', sender = {}) {
 const settle = () => new Promise(r => setTimeout(r, 30));
 
 test('optimize port: an offline run posts start-free done with the result', async () => {
-  stub.promptcraft_settings = { schemaVersion: 3, preferredEngine: 'offline' };
+  stub.promptcraft_settings = { schemaVersion: 5, preferredEngine: 'offline' };
   const port = fakePort();
   await fire('connect', port);
   await port.send({ type: 'start', payload: { text: 'write a haiku' } });
@@ -312,7 +336,7 @@ test('optimize port: an offline run posts start-free done with the result', asyn
 });
 
 test('optimize port: cancel aborts an in-flight request and reports cancelled', async () => {
-  stub.promptcraft_settings = { schemaVersion: 3, preferredEngine: 'openai', openaiApiKey: 'K' };
+  stub.promptcraft_settings = { schemaVersion: 5, preferredEngine: 'openai', openaiApiKey: 'K' };
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (url, init) => new Promise((_, reject) =>
     init.signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError'))));
@@ -331,7 +355,7 @@ test('optimize port: cancel aborts an in-flight request and reports cancelled', 
 });
 
 test('optimize port: refine routes to refinePrompt and errors are posted, not thrown', async () => {
-  stub.promptcraft_settings = { schemaVersion: 3, preferredEngine: 'offline' };
+  stub.promptcraft_settings = { schemaVersion: 5, preferredEngine: 'offline' };
   const port = fakePort();
   await fire('connect', port);
   await port.send({ type: 'start', payload: { action: 'refine', kind: 'shorter', previous: 'x', text: 'y' } });
@@ -339,6 +363,137 @@ test('optimize port: refine routes to refinePrompt and errors are posted, not th
   const last = port.posted.at(-1);
   assert.equal(last.type, 'error');
   assert.match(last.error, /needs an AI engine/);
+});
+
+test('optimize port: custom refine forwards instruction and records history', async () => {
+  stub.promptcraft_settings = { schemaVersion: 5, preferredEngine: 'omniroute', omnirouteEnabled: true };
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  globalThis.fetch = async (url, init) => {
+    requests.push({ url, body: JSON.parse(init.body) });
+    return new Response(JSON.stringify({ choices: [{ message: { content: 'YAML version of the prompt' } }] }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  };
+  try {
+    const port = fakePort();
+    await fire('connect', port);
+    await port.send({
+      type: 'start',
+      payload: {
+        action: 'refine',
+        kind: 'custom',
+        instruction: 'Output YAML only',
+        previous: 'Act as a security reviewer.',
+        text: 'review security'
+      }
+    });
+    await settle();
+    const done = port.posted.find(m => m.type === 'done');
+    assert.ok(done, JSON.stringify(port.posted));
+    assert.equal(done.data.engine, 'omniroute');
+    assert.equal(done.data.refinement, 'custom');
+    assert.equal(done.data.optimized, 'YAML version of the prompt');
+    assert.match(requests[0].url, /^http:\/\/localhost:20128\/v1\/chat\/completions$/);
+    assert.match(requests[0].body.messages[1].content, /<instruction>\nOutput YAML only\n<\/instruction>/);
+    assert.equal(stub.promptcraft_history.length, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('optimize port: start events carry model ID across ordered same-provider fallback', async () => {
+  stub.promptcraft_settings = {
+    schemaVersion: 5,
+    preferredEngine: 'openai',
+    openaiApiKey: 'K',
+    openaiModel: 'gpt-4.1',
+    fallback1Engine: 'openai',
+    fallback1Model: 'gpt-4o-mini'
+  };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, init) => {
+    const body = JSON.parse(init.body);
+    if (body.model === 'gpt-4.1') {
+      return new Response(JSON.stringify({ error: { message: 'Model overloaded' } }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+    return new Response(JSON.stringify({ choices: [{ message: { content: 'Fallback model rewrite' } }] }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  };
+  try {
+    const port = fakePort();
+    await fire('connect', port);
+    await port.send({ type: 'start', payload: { text: 'write a test plan' } });
+    await settle();
+    const starts = port.posted.filter(m => m.type === 'start');
+    assert.deepEqual(starts.map(s => [s.engine, s.model]), [
+      ['openai', 'gpt-4.1'],
+      ['openai', 'gpt-4o-mini']
+    ]);
+    const done = port.posted.find(m => m.type === 'done');
+    assert.equal(done.data.engine, 'openai');
+    assert.equal(done.data.model, 'gpt-4o-mini');
+    assert.equal(done.data.requestedModel, 'gpt-4.1');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('optimize port: repair runs without adding history and forwards 429 retry status', async () => {
+  stub.promptcraft_settings = {
+    schemaVersion: 5,
+    preferredEngine: 'omniroute',
+    omnirouteEnabled: true,
+    omnirouteBaseUrl: 'http://localhost:20128/v1'
+  };
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls++;
+    if (calls === 1) {
+      return new Response(JSON.stringify({ error: { message: 'Slow down' } }), {
+        status: 429,
+        headers: { 'Content-Type': 'application/json', 'Retry-After': '0.02' }
+      });
+    }
+    return new Response(JSON.stringify({ choices: [{ message: { content: 'write a test for login' } }] }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  };
+  try {
+    const port = fakePort();
+    await fire('connect', port);
+    await port.send({ type: 'start', payload: { action: 'repair', text: 'wrte a tst for lgoin' } });
+    await new Promise(r => setTimeout(r, 80));
+
+    const statusMsg = port.posted.find(m => m.type === 'status');
+    assert.ok(statusMsg, `expected retry status message, got ${JSON.stringify(port.posted)}`);
+    assert.equal(statusMsg.kind, 'retry');
+    assert.equal(statusMsg.status, 429);
+
+    const done = port.posted.find(m => m.type === 'done');
+    assert.ok(done, JSON.stringify(port.posted));
+    assert.equal(done.data.changed, true);
+    assert.equal(done.data.repaired, 'write a test for login');
+    assert.equal(stub.promptcraft_history, undefined, 'repair must not pollute prompt history');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('OPTIMIZE_PROMPT honors action: repair cleanly', async () => {
+  stub.promptcraft_settings = { schemaVersion: 5, preferredEngine: 'offline' };
+  const res = await send({ type: 'OPTIMIZE_PROMPT', payload: { action: 'repair', text: 'fix typo' } }, { tab: { id: 4 } });
+  assert.equal(res.success, true);
+  assert.equal(res.data.changed, false);
+  assert.equal(res.data.skipped, 'offline');
 });
 
 test('ports with other names are ignored', async () => {

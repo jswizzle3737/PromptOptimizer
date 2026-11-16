@@ -2,7 +2,9 @@ import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { installChromeStub, sha256Hex } from './helpers.mjs';
 import {
-  DEFAULT_SETTINGS, SCHEMA_VERSION, PROVIDER_DEFAULTS, migrateSettings, getSettings, saveSettings
+  DEFAULT_SETTINGS, SCHEMA_VERSION, PROVIDER_DEFAULTS, MAX_HISTORY_MIN, MAX_HISTORY_MAX,
+  clampMaxHistory, normalizeBaseUrl, migrateSettings, getSettings, saveSettings,
+  getHistory, addHistoryEntry, removeHistoryEntry, clearHistory
 } from '../shared/storage.js';
 import { escapeHtml } from '../shared/select.js';
 
@@ -17,15 +19,37 @@ beforeEach(async () => {
 
 test('defaults ship with no credential and Chrome Nano selected', () => {
   assert.equal(DEFAULT_SETTINGS.openrouterApiKey, '');
+  assert.equal(DEFAULT_SETTINGS.omnirouteApiKey, '');
+  assert.equal(DEFAULT_SETTINGS.omnirouteEnabled, false);
+  assert.equal(DEFAULT_SETTINGS.omnirouteBaseUrl, 'http://localhost:20128/v1');
+  assert.equal(DEFAULT_SETTINGS.omnirouteModel, 'auto');
+  assert.equal(DEFAULT_SETTINGS.allowCloudFallback, true);
+  assert.equal(DEFAULT_SETTINGS.fallback1Engine, '');
+  assert.equal(DEFAULT_SETTINGS.fallback1Model, '');
+  assert.equal(DEFAULT_SETTINGS.fallback2Engine, '');
+  assert.equal(DEFAULT_SETTINGS.fallback2Model, '');
+  assert.equal(DEFAULT_SETTINGS.quickRepairEnabled, true);
   assert.equal(DEFAULT_SETTINGS.preferredEngine, 'nano');
-  assert.equal(SCHEMA_VERSION, 3);
+  assert.equal(SCHEMA_VERSION, 5);
 });
 
 test('a fresh install resolves to the new defaults', async () => {
   const s = await migrateSettings(undefined, RETIRED_HASHES);
   assert.equal(s.openrouterApiKey, '');
   assert.equal(s.preferredEngine, 'nano');
-  assert.equal(s.schemaVersion, 3);
+  assert.equal(s.allowCloudFallback, true);
+  assert.equal(s.omnirouteEnabled, false);
+  assert.equal(s.quickRepairEnabled, true);
+  assert.equal(s.fallback1Engine, '');
+  assert.equal(s.fallback1Model, '');
+  assert.equal(s.fallback2Engine, '');
+  assert.equal(s.fallback2Model, '');
+  assert.equal(s.schemaVersion, 5);
+
+  const disabled = await migrateSettings({ schemaVersion: 5, quickRepairEnabled: false }, RETIRED_HASHES);
+  assert.equal(disabled.quickRepairEnabled, false);
+  const restored = await migrateSettings({ schemaVersion: 5, quickRepairEnabled: undefined }, RETIRED_HASHES);
+  assert.equal(restored.quickRepairEnabled, true);
 });
 
 test('the retired embedded key is blanked and the engine moves off OpenRouter', async () => {
@@ -87,8 +111,8 @@ test('getSettings persists the migration once', async () => {
     promptcraft_settings: { schemaVersion: 2, preferredEngine: 'openrouter', geminiModel: 'gemini-1.5-flash' }
   });
   const s = await getSettings();
-  assert.equal(s.schemaVersion, 3);
-  assert.equal(data.promptcraft_settings.schemaVersion, 3);
+  assert.equal(s.schemaVersion, 5);
+  assert.equal(data.promptcraft_settings.schemaVersion, 5);
   assert.equal(data.promptcraft_settings.geminiModel, PROVIDER_DEFAULTS.gemini.model);
 });
 
@@ -103,7 +127,7 @@ test('no provider default is a retired model id', () => {
    survive. */
 test('concurrent saveSettings calls do not lose each other’s fields', async () => {
   const data = installChromeStub({
-    promptcraft_settings: { schemaVersion: 3, preferredEngine: 'nano', theme: 'dark' }
+    promptcraft_settings: { schemaVersion: 4, preferredEngine: 'nano', theme: 'dark' }
   });
   await Promise.all([
     saveSettings({ preferredEngine: 'openrouter' }),
@@ -114,7 +138,7 @@ test('concurrent saveSettings calls do not lose each other’s fields', async ()
 });
 
 test('a rejected saveSettings does not wedge later writes', async () => {
-  installChromeStub({ promptcraft_settings: { schemaVersion: 3, theme: 'dark' } });
+  installChromeStub({ promptcraft_settings: { schemaVersion: 4, theme: 'dark' } });
   // Force the first write to fail mid-flight, then confirm a later write still lands.
   const originalSet = chrome.storage.local.set;
   chrome.storage.local.set = async () => { throw new Error('disk full'); };
@@ -133,3 +157,123 @@ test('escapeHtml neutralises single quotes as well as the double-quote set', () 
   assert.equal(escapeHtml(`<a href="x" onmouseover='y'>&`), '&lt;a href=&quot;x&quot; onmouseover=&#39;y&#39;&gt;&amp;');
   assert.equal(escapeHtml(undefined), '');
 });
+
+/* ----------------------------------------------------------- v4/v5 migrations */
+
+test('v3 to v5 migration normalizes omniroute, allowCloudFallback, and maxHistoryItems', async () => {
+  const strict = await migrateSettings({
+    schemaVersion: 3,
+    allowCloudFallback: false,
+    omnirouteApiKey: 'or-local-key',
+    omnirouteBaseUrl: 'http://localhost:20128/',
+    maxHistoryItems: 500
+  }, RETIRED_HASHES);
+  assert.equal(strict.schemaVersion, 5);
+  assert.equal(strict.allowCloudFallback, false);
+  assert.equal(strict.omnirouteEnabled, true, 'key enables omniroute automatically');
+  assert.equal(strict.omnirouteBaseUrl, 'http://localhost:20128/v1');
+  assert.equal(strict.maxHistoryItems, MAX_HISTORY_MAX);
+
+  const selected = await migrateSettings({
+    schemaVersion: 3,
+    preferredEngine: 'omniroute',
+    omnirouteBaseUrl: 'ftp://invalid',
+    maxHistoryItems: 1
+  }, RETIRED_HASHES);
+  assert.equal(selected.omnirouteEnabled, true, 'preferredEngine omniroute enables gateway');
+  assert.equal(selected.omnirouteBaseUrl, PROVIDER_DEFAULTS.omniroute.baseUrl);
+  assert.equal(selected.maxHistoryItems, MAX_HISTORY_MIN);
+  assert.equal(selected.allowCloudFallback, true);
+});
+
+test('v4 to v5 migration normalizes ordered fallback slots without forcing omnirouteEnabled', async () => {
+  const normalized = await migrateSettings({
+    schemaVersion: 4,
+    fallback1Engine: ' openai ',
+    fallback1Model: ' gpt-4.1 ',
+    fallback2Engine: 'omniroute',
+    fallback2Model: 'auto/coding:free',
+    omnirouteEnabled: false
+  }, RETIRED_HASHES);
+  assert.equal(normalized.schemaVersion, 5);
+  assert.equal(normalized.fallback1Engine, 'openai');
+  assert.equal(normalized.fallback1Model, 'gpt-4.1');
+  assert.equal(normalized.fallback2Engine, 'omniroute');
+  assert.equal(normalized.fallback2Model, 'auto/coding:free');
+  assert.equal(normalized.omnirouteEnabled, false, 'fallback omniroute slot must not force general auto-fallback on');
+
+  const sanitized = await migrateSettings({
+    schemaVersion: 4,
+    fallback1Engine: 'unknown-engine',
+    fallback1Model: 'orphan-model',
+    fallback2Engine: 'offline',
+    fallback2Model: 'should-clear'
+  }, RETIRED_HASHES);
+  assert.equal(sanitized.fallback1Engine, '');
+  assert.equal(sanitized.fallback1Model, '');
+  assert.equal(sanitized.fallback2Engine, 'offline');
+  assert.equal(sanitized.fallback2Model, '');
+
+  const nanoSlot = await migrateSettings({
+    schemaVersion: 4,
+    fallback1Engine: 'nano',
+    fallback1Model: 'unused-nano-model'
+  }, RETIRED_HASHES);
+  assert.equal(nanoSlot.fallback1Engine, 'nano');
+  assert.equal(nanoSlot.fallback1Model, '');
+});
+
+test('normalizeBaseUrl strips slashes, adds /v1 only when path is empty, and rejects non-HTTP(S)', () => {
+  assert.equal(normalizeBaseUrl('http://localhost:20128'), 'http://localhost:20128/v1');
+  assert.equal(normalizeBaseUrl('http://localhost:20128/'), 'http://localhost:20128/v1');
+  assert.equal(normalizeBaseUrl('https://gw.example.com/custom///'), 'https://gw.example.com/custom');
+  assert.equal(normalizeBaseUrl('https://gw.example.com/api/v2'), 'https://gw.example.com/api/v2');
+  assert.equal(normalizeBaseUrl(''), '');
+  assert.equal(normalizeBaseUrl('ftp://localhost:20128'), '');
+  assert.equal(normalizeBaseUrl('javascript:alert(1)'), '');
+  assert.equal(normalizeBaseUrl('not-a-url'), '');
+});
+
+test('clampMaxHistory bounds integers to [5, 100]', () => {
+  assert.equal(clampMaxHistory(0), MAX_HISTORY_MIN);
+  assert.equal(clampMaxHistory(5), 5);
+  assert.equal(clampMaxHistory(42), 42);
+  assert.equal(clampMaxHistory(100), 100);
+  assert.equal(clampMaxHistory(999), MAX_HISTORY_MAX);
+  assert.equal(clampMaxHistory('abc', 25), 25);
+});
+
+/* ----------------------------------------------------------- history CRUD */
+
+test('addHistoryEntry deduplicates (original, framework), enforces clamped max, and serializes writes', async () => {
+  installChromeStub({ promptcraft_settings: { schemaVersion: 5, maxHistoryItems: 5 } });
+
+  const first = await addHistoryEntry({ original: 'draft A', optimized: 'opt A1', engine: 'offline', framework: 'rtf' });
+  await addHistoryEntry({ original: 'draft A', optimized: 'opt A2', engine: 'openai', framework: 'smart-expand' });
+  const dedup = await addHistoryEntry({ original: 'draft A', optimized: 'opt A3', engine: 'openai', framework: 'rtf' });
+
+  let list = await getHistory();
+  assert.equal(list.length, 2, 'same (original, framework) replaces previous entry');
+  assert.equal(list[0].id, dedup.id);
+  assert.equal(list[0].optimized, 'opt A3');
+  assert.ok(!list.some(e => e.id === first.id));
+
+  await Promise.all([
+    addHistoryEntry({ original: 'd1', optimized: 'o1', engine: 'offline', framework: 'rtf' }),
+    addHistoryEntry({ original: 'd2', optimized: 'o2', engine: 'offline', framework: 'rtf' }),
+    addHistoryEntry({ original: 'd3', optimized: 'o3', engine: 'offline', framework: 'rtf' }),
+    addHistoryEntry({ original: 'd4', optimized: 'o4', engine: 'offline', framework: 'rtf' }),
+    addHistoryEntry({ original: 'd5', optimized: 'o5', engine: 'offline', framework: 'rtf' })
+  ]);
+  list = await getHistory();
+  assert.equal(list.length, 5, 'capped at clamped maxHistoryItems = 5');
+
+  const removed = await removeHistoryEntry(list[0].id);
+  assert.equal(removed, true);
+  assert.equal((await getHistory()).length, 4);
+  assert.equal(await removeHistoryEntry('nonexistent'), false);
+
+  await clearHistory();
+  assert.deepEqual(await getHistory(), []);
+});
+

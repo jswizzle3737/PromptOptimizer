@@ -2,8 +2,11 @@ import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { installChromeStub } from './helpers.mjs';
 import {
-  getTargetProfile, buildExplanationChips, TARGET_PROFILES, TECHNIQUES
+  getTargetProfile, buildExplanationChips, TARGET_PROFILES, TECHNIQUES,
+  PLATFORM_INPUT_SELECTORS, GENERIC_INPUT_SELECTORS, COMPOSER_ANCHOR_SELECTORS,
+  getChatInputSelectors, normalizeEditableText, editableTextsMatch
 } from '../shared/target-profiles.js';
+import { hasIcon, icon } from '../shared/icons.js';
 import { generateOfflineOptimization, DEFAULT_FRAMEWORKS, analyzePromptSignals } from '../shared/frameworks.js';
 import { optimizePrompt, buildSystemPrompt } from '../shared/optimizer-engine.js';
 
@@ -19,14 +22,19 @@ test('every supported AI host resolves to its profile', () => {
   assert.equal(getTargetProfile('chatgpt.com').id, 'openai');
   assert.equal(getTargetProfile('chat.openai.com').id, 'openai');
   assert.equal(getTargetProfile('gemini.google.com').id, 'gemini');
+  assert.equal(getTargetProfile('aistudio.google.com').id, 'gemini');
+  assert.equal(getTargetProfile('perplexity.ai').id, 'perplexity');
   assert.equal(getTargetProfile('www.perplexity.ai').id, 'perplexity');
   assert.equal(getTargetProfile('chat.deepseek.com').id, 'deepseek');
+  assert.equal(getTargetProfile('grok.com').id, 'grok');
+  assert.equal(getTargetProfile('copilot.microsoft.com').id, 'copilot');
   assert.equal(getTargetProfile('chat.mistral.ai').id, 'mistral');
 });
 
 test('subdomains, full URLs, and mixed case still resolve', () => {
   assert.equal(getTargetProfile('labs.perplexity.ai').id, 'perplexity');
   assert.equal(getTargetProfile('https://chatgpt.com/c/abc-123').id, 'openai');
+  assert.equal(getTargetProfile('https://aistudio.google.com/prompts/new_chat').id, 'gemini');
   assert.equal(getTargetProfile('Claude.AI').id, 'claude');
 });
 
@@ -43,6 +51,54 @@ test('every profile carries guidance for both engine and offline paths', () => {
     assert.ok(p.id && p.name, 'profile needs id and name');
     assert.ok(p.systemGuidance?.length > 20, `${p.id} needs system guidance`);
     assert.ok(p.offlineNote?.length > 10, `${p.id} needs an offline note`);
+    assert.ok(Array.isArray(PLATFORM_INPUT_SELECTORS[p.id]) && PLATFORM_INPUT_SELECTORS[p.id].length > 0, `${p.id} needs input selectors`);
+  }
+});
+
+test('getChatInputSelectors prioritizes recognized platform selectors before generic fallbacks', () => {
+  const geminiSelectors = getChatInputSelectors('gemini.google.com');
+  const aiStudioSelectors = getChatInputSelectors(getTargetProfile('aistudio.google.com'));
+  assert.deepEqual(geminiSelectors, aiStudioSelectors);
+  assert.equal(geminiSelectors[0], PLATFORM_INPUT_SELECTORS.gemini[0]);
+  assert.match(geminiSelectors[0], /^input-area-v2\s+rich-textarea\s+div\.ql-editor/);
+  assert.match(geminiSelectors[0], /:not\(\[contenteditable="false"\]\)/);
+  assert.ok(geminiSelectors.includes('ms-autosize-textarea textarea'), 'AI Studio textarea selector included');
+  for (const g of GENERIC_INPUT_SELECTORS) {
+    assert.ok(geminiSelectors.includes(g), `expected generic fallback ${g}`);
+  }
+  assert.equal(new Set(geminiSelectors).size, geminiSelectors.length, 'selectors must be deduplicated');
+
+  assert.deepEqual(getChatInputSelectors('example.com'), GENERIC_INPUT_SELECTORS);
+  assert.deepEqual(getChatInputSelectors(null), GENERIC_INPUT_SELECTORS);
+  assert.ok(
+    COMPOSER_ANCHOR_SELECTORS.indexOf('.input-area') < COMPOSER_ANCHOR_SELECTORS.indexOf('rich-textarea'),
+    'outer composer wrapper should precede rich-textarea so buttons inside .input-area are cleared'
+  );
+  assert.ok(
+    COMPOSER_ANCHOR_SELECTORS.indexOf('.input-area') < COMPOSER_ANCHOR_SELECTORS.indexOf('.text-input-field'),
+    '.input-area should precede .text-input-field so external adjacent send buttons are included'
+  );
+  assert.ok(COMPOSER_ANCHOR_SELECTORS.includes('input-area-v2'));
+  assert.ok(COMPOSER_ANCHOR_SELECTORS.includes('ms-prompt-input'));
+});
+
+test('normalizeEditableText and editableTextsMatch tolerate NBSP and whitespace normalization while preserving newline structure', () => {
+  assert.equal(normalizeEditableText('  hello\u00a0world\r\nline 2\r '), 'hello world\nline 2');
+  assert.equal(editableTextsMatch('Role:\u00a0\u00a0Expert\n\nTask:  Help', 'Role: Expert\n\nTask: Help'), true);
+  assert.equal(editableTextsMatch('First\nSecond', 'First\n\nSecond'), true);
+  assert.equal(editableTextsMatch('First Second', 'First\nSecond'), false, 'must reject flattened single-line output when multi-line expected');
+  assert.equal(editableTextsMatch('First\nThird', 'First\nSecond\nThird'), false, 'must detect missing lines or edits');
+  assert.equal(editableTextsMatch('draft edited', 'draft'), false);
+  assert.equal(editableTextsMatch('unexpected', ''), false);
+  assert.equal(editableTextsMatch('', ''), true);
+});
+
+test('star and undo icons are registered for quick chat enhancement', () => {
+  for (const name of ['star', 'undo']) {
+    assert.equal(hasIcon(name), true);
+    const svg = icon(name, { size: 15 });
+    assert.match(svg, /<svg[^>]*>/);
+    assert.match(svg, /<path\b/);
   }
 });
 
@@ -89,12 +145,14 @@ test('every chip has both a label and a hoverable detail', () => {
 
 /* --------------------------------------------------- prompt construction */
 
-test('buildSystemPrompt keeps the raw-prompt rule and adds the technique block', () => {
+test('buildSystemPrompt keeps the raw-prompt rule, preservation rule, and technique block', () => {
   const out = buildSystemPrompt('You rewrite prompts.');
   assert.match(out, /You rewrite prompts\./);
   assert.match(out, /<raw_prompt>/);
   assert.match(out, /quality techniques/i);
   assert.match(out, /citing sources/i);
+  assert.match(out, /@file.*@mention.*\/command/i);
+  assert.match(out, /Match the language/i);
 });
 
 test('buildSystemPrompt injects target guidance only when a profile is given', () => {

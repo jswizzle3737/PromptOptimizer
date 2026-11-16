@@ -7,15 +7,55 @@
  *  3. Whether any rendered element paints text in the surface color.
  */
 
-const { spawn } = require('child_process');
+const { spawn, execFileSync } = require('child_process');
+const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
-const BROWSER_PATH = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
+function findBrowserExecutable() {
+  if (process.env.BROWSER_PATH && fs.existsSync(process.env.BROWSER_PATH)) {
+    return process.env.BROWSER_PATH;
+  }
+  const candidatesByPlatform = {
+    linux: [
+      '/usr/bin/chromium',
+      '/usr/bin/chromium-browser',
+      '/snap/bin/chromium',
+      '/usr/bin/google-chrome'
+    ],
+    darwin: [
+      '/Applications/Chromium.app/Contents/MacOS/Chromium',
+      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+      '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge'
+    ],
+    win32: [
+      'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+      'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+      'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+      'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe'
+    ]
+  };
+  for (const p of candidatesByPlatform[process.platform] || []) {
+    if (fs.existsSync(p)) return p;
+  }
+  if (process.platform !== 'win32') {
+    for (const cmd of ['chromium', 'chromium-browser', 'google-chrome']) {
+      try {
+        const resolved = execFileSync('which', [cmd], { encoding: 'utf8' }).trim();
+        if (resolved && fs.existsSync(resolved)) return resolved;
+      } catch {}
+    }
+  }
+  throw new Error(`No supported Chromium/Chrome/Edge binary found for platform "${process.platform}". Set BROWSER_PATH.`);
+}
+
+const BROWSER_PATH = findBrowserExecutable();
 const EXT_PATH = path.resolve(__dirname);
-const TEMP_USER_DATA = path.join(process.env.TEMP || 'C:\\Temp', `pc-theme-check-${Date.now()}`);
+const TEMP_USER_DATA = path.join(os.tmpdir(), `pc-theme-check-${Date.now()}`);
+const DEBUG_PORT = 9333;
 
 /* The designs on offer are whatever THEMES lists in theme-picker.js. */
-const THEMES = [...require('fs')
+const THEMES = [...fs
   .readFileSync(path.join(EXT_PATH, 'shared', 'theme-picker.js'), 'utf8')
   .matchAll(/^\s*id:\s*'([a-z]+)'/gm)].map(m => m[1]);
 
@@ -23,6 +63,27 @@ const THEMES = [...require('fs')
 const SHOTS_DIR = process.env.SHOTS_DIR || null;
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+let cdpBase = null;
+async function cdpFetch(pathname, options = {}) {
+  if (cdpBase) {
+    return fetch(cdpBase + pathname, { ...options, signal: AbortSignal.timeout(8000) });
+  }
+  let lastErr;
+  for (const host of ['127.0.0.1', '[::1]', 'localhost']) {
+    try {
+      const res = await fetch(`http://${host}:${DEBUG_PORT}${pathname}`, {
+        ...options,
+        signal: AbortSignal.timeout(8000)
+      });
+      cdpBase = `http://${host}:${DEBUG_PORT}`;
+      return res;
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr || new Error(`CDP unreachable on port ${DEBUG_PORT}`);
+}
 
 function createCdpClient(wsUrl) {
   return new Promise((resolve, reject) => {
@@ -159,38 +220,51 @@ const AUDIT = `
 `;
 
 async function main() {
-  require('fs').mkdirSync(TEMP_USER_DATA, { recursive: true });
+  fs.mkdirSync(TEMP_USER_DATA, { recursive: true });
 
-  const proc = spawn(BROWSER_PATH, [
+  const browserArgs = [
     `--user-data-dir=${TEMP_USER_DATA}`,
     `--load-extension=${EXT_PATH}`,
-    '--remote-debugging-port=9333',
-    '--no-first-run', '--no-default-browser-check', '--headless=new', 'about:blank'
-  ], { stdio: 'ignore' });
+    `--remote-debugging-port=${DEBUG_PORT}`,
+    '--remote-debugging-address=127.0.0.1',
+    '--no-first-run', '--no-default-browser-check', '--headless=new',
+    ...(process.platform === 'linux' ? ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu'] : []),
+    'about:blank'
+  ];
+
+  const proc = spawn(BROWSER_PATH, browserArgs, {
+    stdio: 'ignore',
+    detached: process.platform !== 'win32'
+  });
 
   let ok = false;
-  for (let i = 0; i < 30; i++) {
-    try { if ((await fetch('http://127.0.0.1:9333/json/version')).ok) { ok = true; break; } }
+  for (let i = 0; i < 40; i++) {
+    try { if ((await cdpFetch('/json/version')).ok) { ok = true; break; } }
     catch { await sleep(300); }
   }
   if (!ok) throw new Error('Browser did not start');
 
   try {
     let extId = null;
-    for (let i = 0; i < 25 && !extId; i++) {
-      const targets = await (await fetch('http://127.0.0.1:9333/json/list')).json();
+    for (let i = 0; i < 30 && !extId; i++) {
+      const targets = await (await cdpFetch('/json/list')).json();
       const sw = targets.find(t => t.type === 'service_worker' && t.url.includes('service-worker.js'));
       extId = sw?.url.match(/chrome-extension:\/\/([a-z0-9]+)/i)?.[1];
       if (!extId) await sleep(300);
     }
     if (!extId) throw new Error('Extension not loaded');
 
-    const tab = await (await fetch('http://127.0.0.1:9333/json/new', { method: 'PUT' })).json();
+    const tab = await (await cdpFetch('/json/new', { method: 'PUT' })).json();
     const client = await createCdpClient(tab.webSocketDebuggerUrl);
     await client.send('Runtime.enable');
     await client.send('Page.enable');
     await client.send('Page.navigate', { url: `chrome-extension://${extId}/popup/popup.html` });
-    await sleep(1500);
+    for (let r = 0; r < 20; r++) {
+      const st = await client.send('Runtime.evaluate', { expression: 'document.readyState' });
+      if (st.result.value === 'complete') break;
+      await sleep(200);
+    }
+    await sleep(600);
 
     console.log('Theme audit — WCAG contrast ratios (AA body text needs 4.5, UI/large needs 3.0)\n');
     const header = ['theme', 'primary/canvas', 'primary/surface', 'secondary/surface',
@@ -204,7 +278,7 @@ async function main() {
       await client.send('Runtime.evaluate', {
         expression: `document.documentElement.setAttribute('data-theme', '${theme}')`
       });
-      await sleep(500);
+      await sleep(400);
       const res = await client.send('Runtime.evaluate', { expression: AUDIT, returnByValue: true });
       const r = res.result.value;
 
@@ -247,7 +321,7 @@ async function main() {
       await client.send('Runtime.evaluate', {
         expression: `document.documentElement.setAttribute('data-theme', '${theme}')`
       });
-      await sleep(400);
+      await sleep(350);
       const res = await client.send('Runtime.evaluate', { expression: AUDIT, returnByValue: true });
       const r = res.result.value;
       const flags = [];
@@ -258,9 +332,9 @@ async function main() {
       if (r.invisible.length) console.log('   ', JSON.stringify(r.invisible));
 
       if (SHOTS_DIR) {
-        require('fs').mkdirSync(SHOTS_DIR, { recursive: true });
+        fs.mkdirSync(SHOTS_DIR, { recursive: true });
         const shot = await client.send('Page.captureScreenshot', { format: 'png' });
-        require('fs').writeFileSync(path.join(SHOTS_DIR, `popup-${theme}.png`), Buffer.from(shot.data, 'base64'));
+        fs.writeFileSync(path.join(SHOTS_DIR, `popup-${theme}.png`), Buffer.from(shot.data, 'base64'));
       }
     }
 
@@ -269,10 +343,29 @@ async function main() {
       : `FAIL: ${failures} design(s) flagged.`));
 
     client.close();
+    if (failures > 0) {
+      process.exitCode = 1;
+    }
   } finally {
-    proc.kill('SIGTERM');
+    const pid = proc.pid;
+    if (pid) {
+      if (process.platform === 'win32') {
+        try { spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' }); } catch {}
+      } else {
+        try { process.kill(-pid, 'SIGTERM'); } catch {}
+        await sleep(350);
+        try { process.kill(-pid, 'SIGKILL'); } catch {}
+      }
+    }
+    try { proc.kill('SIGKILL'); } catch {}
     await sleep(600);
-    try { require('fs').rmSync(TEMP_USER_DATA, { recursive: true, force: true }); } catch {}
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        fs.rmSync(TEMP_USER_DATA, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
+        if (!fs.existsSync(TEMP_USER_DATA)) break;
+      } catch {}
+      await sleep(400);
+    }
   }
 }
 
