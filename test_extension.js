@@ -1493,6 +1493,22 @@ async function runTests() {
     const http = require('http');
     const server = http.createServer((req, res) => {
       res.writeHead(200, { 'Content-Type': 'text/html' });
+      if (req.url && req.url.startsWith('/composer')) {
+        res.end(`
+          <!DOCTYPE html>
+          <html>
+          <head><title>Composer Fixture</title></head>
+          <body style="padding: 80px;">
+            <div class="input-area" id="composer-shell" style="width: 560px; display: flex; align-items: center; gap: 10px; border: 1px solid #999; border-radius: 16px; padding: 12px 16px;">
+              <textarea id="prompt-textarea" style="display: none;"></textarea>
+              <div id="ce-input" contenteditable="true" role="textbox" style="flex: 1; min-height: 44px; outline: none;"></div>
+              <button id="send-btn" type="button" style="width: 72px; height: 34px;">Send</button>
+            </div>
+          </body>
+          </html>
+        `);
+        return;
+      }
       res.end(`
         <!DOCTYPE html>
         <html>
@@ -1572,38 +1588,61 @@ async function runTests() {
       });
       await sleep(400);
 
-      // Verify trigger pill is displayed
+      // Verify trigger pill AND floating star button are displayed without overlap
       const pillCheck = await evalInIsolated(`
         (() => {
           const shadow = document.getElementById('promptcraft-root-host').shadowRoot;
           const pill = shadow.querySelector('.pc-trigger-pill');
-          return { display: pill.style.display, text: pill.textContent.trim() };
+          const star = shadow.querySelector('#pc-star-btn');
+          const ta = document.getElementById('prompt-textarea');
+          const pRect = pill.getBoundingClientRect();
+          const sRect = star.getBoundingClientRect();
+          const taRect = ta.getBoundingClientRect();
+          const overlapsPill = !(pRect.right <= sRect.left || pRect.left >= sRect.right || pRect.bottom <= sRect.top || pRect.top >= sRect.bottom);
+          return {
+            display: pill.style.display,
+            text: pill.textContent.trim(),
+            starDisplay: star.style.display,
+            starHasSvg: Boolean(star.querySelector('svg')),
+            starOnFarRight: sRect.left >= taRect.right - 2,
+            starInViewport: sRect.right <= window.innerWidth && sRect.bottom <= window.innerHeight && sRect.left >= 0 && sRect.top >= 0,
+            overlapsPill
+          };
         })()
       `);
-      console.log(`✓ Floating Trigger Visible: display="${pillCheck.result.value.display}", text="${pillCheck.result.value.text}"`);
+      const pc = pillCheck.result.value;
+      console.log(`✓ Floating Trigger Visible: display="${pc.display}", text="${pc.text}", star="${pc.starDisplay}" (farRight=${pc.starOnFarRight}, overlap=${pc.overlapsPill})`);
+      if (pc.display !== 'flex' || pc.starDisplay !== 'flex' || !pc.starHasSvg || !pc.starOnFarRight || !pc.starInViewport || pc.overlapsPill) {
+        throw new Error(`Floating trigger / star placement assertion failed: ${JSON.stringify(pc)}`);
+      }
 
-      // Capture-phase scroll listener must hide the pill when textarea scrolls out of view
+      // Capture-phase scroll listener must hide both controls when textarea scrolls out of view
       const scrollPillCheck = await pageClient.send('Runtime.evaluate', {
         awaitPromise: true,
         returnByValue: true,
         expression: `(async () => {
           const scroller = document.getElementById('chat-scroller');
-          const pill = document.getElementById('promptcraft-root-host').shadowRoot.querySelector('.pc-trigger-pill');
+          const shadow = document.getElementById('promptcraft-root-host').shadowRoot;
+          const pill = shadow.querySelector('.pc-trigger-pill');
+          const star = shadow.querySelector('#pc-star-btn');
           scroller.scrollTop = 450;
           await new Promise(r => setTimeout(r, 250));
           const whenScrolledOut = pill.style.display;
+          const starScrolledOut = star.style.display;
           scroller.scrollTop = 0;
           await new Promise(r => setTimeout(r, 250));
           const whenScrolledBack = pill.style.display;
-          return { whenScrolledOut, whenScrolledBack };
+          const starScrolledBack = star.style.display;
+          return { whenScrolledOut, starScrolledOut, whenScrolledBack, starScrolledBack };
         })()`
       });
-      if (scrollPillCheck.result.value.whenScrolledOut !== 'none' || scrollPillCheck.result.value.whenScrolledBack !== 'flex') {
-        throw new Error(`Pill did not hide/restore on container scroll: ${JSON.stringify(scrollPillCheck.result.value)}`);
+      const spc = scrollPillCheck.result.value;
+      if (spc.whenScrolledOut !== 'none' || spc.starScrolledOut !== 'none' || spc.whenScrolledBack !== 'flex' || spc.starScrolledBack !== 'flex') {
+        throw new Error(`Floating controls did not hide/restore on container scroll: ${JSON.stringify(spc)}`);
       }
-      console.log('✓ Floating pill hides when target scrolls offscreen and returns on scroll back');
+      console.log('✓ Floating pill and star button hide when target scrolls offscreen and return on scroll back');
 
-      // The pill must follow the chat box, never a credential field.
+      // Both controls must follow the chat box, never a credential field.
       const sensitiveCheck = await pageClient.send('Runtime.evaluate', {
         awaitPromise: true,
         returnByValue: true,
@@ -1612,18 +1651,41 @@ async function runTests() {
           for (const id of ['login-password', 'login-token']) {
             document.getElementById(id).focus();
             await new Promise(r => setTimeout(r, 300));
-            const pill = document.getElementById('promptcraft-root-host').shadowRoot.querySelector('.pc-trigger-pill');
-            out[id] = pill.style.display;
+            const shadow = document.getElementById('promptcraft-root-host').shadowRoot;
+            out[id] = {
+              pill: shadow.querySelector('.pc-trigger-pill').style.display,
+              star: shadow.querySelector('#pc-star-btn').style.display
+            };
           }
           document.getElementById('prompt-textarea').focus();
           await new Promise(r => setTimeout(r, 400));
           return out;
         })()`
       });
-      console.log('✓ Pill display after focusing sensitive fields:', sensitiveCheck.result.value);
-      for (const [id, display] of Object.entries(sensitiveCheck.result.value)) {
-        if (display !== 'none') throw new Error(`Pill stayed visible on sensitive field #${id}`);
+      console.log('✓ Controls display after focusing sensitive fields:', sensitiveCheck.result.value);
+      for (const [id, st] of Object.entries(sensitiveCheck.result.value)) {
+        if (st.pill !== 'none' || st.star !== 'none') throw new Error(`Controls stayed visible on sensitive field #${id}: ${JSON.stringify(st)}`);
       }
+
+      // Clicking star when the draft is empty gives friendly feedback without opening the modal
+      const emptyStarRes = await evalInIsolated(`(async () => {
+        const ta = document.getElementById('prompt-textarea');
+        const prev = ta.value;
+        ta.value = '   ';
+        const shadow = document.getElementById('promptcraft-root-host').shadowRoot;
+        shadow.querySelector('#pc-star-btn').click();
+        await new Promise(r => setTimeout(r, 150));
+        const modalOpen = shadow.querySelector('.pc-backdrop').classList.contains('is-open');
+        const toastText = shadow.querySelector('#pc-toast').textContent.trim();
+        ta.value = prev;
+        ta.focus();
+        await new Promise(r => setTimeout(r, 150));
+        return { modalOpen, toastText };
+      })()`, true);
+      if (emptyStarRes.result.value.modalOpen || !/Type a prompt/i.test(emptyStarRes.result.value.toastText)) {
+        throw new Error(`Empty-draft star click behaved unexpectedly: ${JSON.stringify(emptyStarRes.result.value)}`);
+      }
+      console.log('✓ Clicking star button with empty draft prompts cleanly without opening modal');
 
       // Click the trigger pill to open modal
       console.log('→ Clicking floating trigger pill...');
@@ -1998,6 +2060,100 @@ async function runTests() {
       } else {
         throw new Error('Chat textarea was not updated with custom prompt. Value: ' + finalVal);
       }
+
+      // Test far-right Star button quick auto-enhance in-place using preconfigured settings + Undo toast
+      console.log('→ Testing far-right Star button auto-enhance with preconfigured setup and Undo...');
+      const quickStarRes = await evalInIsolated(`(async () => {
+        const wait = ms => new Promise(r => setTimeout(r, ms));
+        const until = async (fn, ms = 8000) => { const t = Date.now(); while (Date.now() - t < ms) { const v = fn(); if (v) return v; await wait(100); } return null; };
+        const stored = await chrome.storage.local.get('promptcraft_settings');
+        await chrome.storage.local.set({
+          promptcraft_settings: { ...stored.promptcraft_settings, preferredEngine: 'offline', preferredFramework: 'rtf' }
+        });
+
+        const ta = document.getElementById('prompt-textarea');
+        const originalDraft = 'plan a weekend hiking trip';
+        ta.value = originalDraft;
+        ta.focus();
+        await wait(200);
+
+        const shadow = document.getElementById('promptcraft-root-host').shadowRoot;
+        const star = shadow.querySelector('#pc-star-btn');
+        star.click();
+
+        const replaced = await until(() => ta.value !== originalDraft && ta.value.includes(originalDraft));
+        const modalWasOpened = shadow.querySelector('.pc-backdrop').classList.contains('is-open');
+        const enhancedValue = ta.value;
+        const toastEl = shadow.querySelector('#pc-toast');
+        const undoBtn = shadow.querySelector('.pc-toast__action');
+        const toastShown = toastEl.classList.contains('is-visible') && Boolean(undoBtn);
+        const toastText = toastEl.textContent.trim();
+
+        undoBtn?.click();
+        await wait(150);
+        const restoredValue = ta.value;
+
+        return { replaced: Boolean(replaced), modalWasOpened, enhancedValue, toastShown, toastText, restoredValue, originalDraft };
+      })()`, true);
+      const qsr = quickStarRes.result.value;
+      if (
+        !qsr.replaced ||
+        qsr.modalWasOpened ||
+        !/### ROLE/.test(qsr.enhancedValue) ||
+        !qsr.toastShown ||
+        qsr.restoredValue !== qsr.originalDraft
+      ) {
+        throw new Error(`Star quick-enhance / Undo check failed: ${JSON.stringify(qsr)}`);
+      }
+      console.log(`✓ Star button auto-enhanced draft in-place via preconfigured RTF+offline without opening modal, then Undo restored original`);
+
+      // Test composer-shell anchoring (clears internal Send button, skips hidden backing textarea, enhances contenteditable)
+      console.log('→ Testing content script composer-shell anchoring and contenteditable quick enhance on /composer...');
+      isolatedContextId = null;
+      await pageClient.send('Page.navigate', { url: 'http://127.0.0.1:8765/composer' });
+      for (let i = 0; i < 30 && !isolatedContextId; i++) await sleep(100);
+      await sleep(500);
+      const ceCheck = await evalInIsolated(`(async () => {
+        const wait = ms => new Promise(r => setTimeout(r, ms));
+        const until = async (fn, ms = 8000) => { const t = Date.now(); while (Date.now() - t < ms) { const v = fn(); if (v) return v; await wait(100); } return null; };
+        const ce = document.getElementById('ce-input');
+        ce.textContent = 'draft a launch announcement';
+        await wait(250);
+
+        const shadow = document.getElementById('promptcraft-root-host').shadowRoot;
+        const star = shadow.querySelector('#pc-star-btn');
+        await until(() => star.style.display === 'flex');
+        const sRect = star.getBoundingClientRect();
+        const sendRect = document.getElementById('send-btn').getBoundingClientRect();
+        const shellRect = document.getElementById('composer-shell').getBoundingClientRect();
+
+        star.click();
+        const updated = await until(() => (ce.innerText || ce.textContent).includes('ROLE') && (ce.innerText || ce.textContent).includes('draft a launch announcement'));
+        const afterText = ce.innerText || ce.textContent;
+        shadow.querySelector('.pc-toast__action')?.click();
+        await wait(150);
+        const undoneText = (ce.innerText || ce.textContent).trim();
+
+        return {
+          starDisplay: star.style.display,
+          clearsComposerRightEdge: sRect.left >= shellRect.right - 2,
+          clearsSendButton: sRect.left >= sendRect.right,
+          updated: Boolean(updated),
+          afterLen: afterText.length,
+          undoneText
+        };
+      })()`, true);
+      const cec = ceCheck.result.value;
+      if (
+        cec.starDisplay !== 'flex' ||
+        !cec.clearsComposerRightEdge ||
+        !cec.clearsSendButton ||
+        !cec.updated ||
+        cec.undoneText !== 'draft a launch announcement'
+      ) {
+        throw new Error(`Composer-shell / contenteditable quick-enhance failed: ${JSON.stringify(cec)}`);
+      }
+      console.log('✓ Composer anchor skipped hidden textarea, cleared Send button on far right, and enhanced/undid contenteditable draft');
 
       pageClient.close();
 

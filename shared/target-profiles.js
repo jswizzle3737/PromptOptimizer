@@ -43,7 +43,7 @@ export const TARGET_PROFILES = [
   {
     id: 'gemini',
     name: 'Gemini',
-    hosts: ['gemini.google.com'],
+    hosts: ['gemini.google.com', 'aistudio.google.com'],
     systemGuidance:
       'Structure the rewritten prompt for Google Gemini: concise directive sentences under Markdown ' +
       'headings; Gemini rewards explicit, unambiguous task statements over long prose.',
@@ -119,6 +119,93 @@ export function getTargetProfile(hostOrUrl) {
     if (profile.hosts.some(h => host === h || host.endsWith('.' + h))) return profile;
   }
   return null;
+}
+
+/* Platform-prioritized chat input selectors so hidden backing textareas or
+   off-target controls are skipped cleanly in favor of the live AI composer. */
+export const PLATFORM_INPUT_SELECTORS = {
+  gemini: [
+    'rich-textarea div.ql-editor[contenteditable="true"]',
+    'div.ql-editor.textarea[contenteditable="true"]',
+    'ms-autosize-textarea textarea',
+    'textarea[aria-label*="Enter a prompt" i]',
+    'div[contenteditable="true"][role="textbox"]'
+  ],
+  openai: [
+    '#prompt-textarea[contenteditable="true"]',
+    '#prompt-textarea',
+    'textarea[data-id="root"]',
+    'div.ProseMirror[contenteditable="true"]'
+  ],
+  claude: [
+    'div.ProseMirror[contenteditable="true"]',
+    '[data-testid="chat-input"]',
+    'fieldset [contenteditable="true"]',
+    'div[contenteditable="true"][role="textbox"]'
+  ],
+  perplexity: [
+    '#ask-input[contenteditable="true"]',
+    '#ask-input',
+    'textarea[placeholder*="Ask" i]',
+    'div[contenteditable="true"][role="textbox"]'
+  ],
+  deepseek: [
+    'textarea#chat-input',
+    'textarea[placeholder*="DeepSeek" i]'
+  ],
+  grok: [
+    'div.ProseMirror[contenteditable="true"]',
+    'textarea[aria-label*="Grok" i]',
+    'textarea[placeholder*="Ask" i]'
+  ],
+  copilot: [
+    '#userInput',
+    'textarea[placeholder*="Copilot" i]',
+    'div[contenteditable="true"][role="textbox"]'
+  ],
+  mistral: [
+    'div.ProseMirror[contenteditable="true"]',
+    'textarea[placeholder*="Mistral" i]'
+  ]
+};
+
+export const GENERIC_INPUT_SELECTORS = [
+  '#prompt-textarea',
+  '[role="textbox"][contenteditable="true"]',
+  'div[contenteditable="true"]',
+  'textarea'
+];
+
+export const COMPOSER_ANCHOR_SELECTORS = [
+  '[data-testid*="composer" i]',
+  '[class*="composer" i]',
+  '.input-area',
+  '.text-input-field',
+  'fieldset',
+  'form',
+  '[data-testid*="chat-input" i]',
+  'rich-textarea'
+];
+
+/**
+ * Return ordered CSS selectors for finding the primary chat composer on a host.
+ * Accepts a hostname, full URL, profile object, or profile id.
+ */
+export function getChatInputSelectors(hostOrProfile) {
+  let profileId = null;
+  if (typeof hostOrProfile === 'object' && hostOrProfile?.id) {
+    profileId = hostOrProfile.id;
+  } else if (typeof hostOrProfile === 'string') {
+    if (PLATFORM_INPUT_SELECTORS[hostOrProfile]) {
+      profileId = hostOrProfile;
+    } else {
+      profileId = getTargetProfile(hostOrProfile)?.id || null;
+    }
+  }
+  const specific = profileId && PLATFORM_INPUT_SELECTORS[profileId]
+    ? PLATFORM_INPUT_SELECTORS[profileId]
+    : [];
+  return [...new Set([...specific, ...GENERIC_INPUT_SELECTORS])];
 }
 
 /* ------------------------------------------------------------------ */

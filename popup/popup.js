@@ -18,6 +18,7 @@ import {
 import { checkBuiltInPromptApiStatus, verifyProvider } from '../shared/optimizer-engine.js';
 import { NANO_SESSION_OPTIONS } from '../shared/nano.js';
 import { scorePrompt, contractTraitIds } from '../shared/scorer.js';
+import { getTargetProfile } from '../shared/target-profiles.js';
 
 document.addEventListener('DOMContentLoaded', async () => {
   hydrateIcons(document);
@@ -31,6 +32,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     themeSlot: document.getElementById('theme-toggle-slot'),
     engineSlot: document.getElementById('engine-slot'),
     rawPrompt: document.getElementById('raw-prompt'),
+    targetBadge: document.getElementById('target-badge'),
     clearDraftBtn: document.getElementById('clear-draft-btn'),
     charCounter: document.getElementById('char-counter'),
     optimizeBtn: document.getElementById('optimize-btn'),
@@ -84,6 +86,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     framework: 'smart-expand',
     engine: DEFAULT_ENGINE,
     theme: 'dark',
+    host: null,
     latest: '',
     /* What the result on screen came from, so a saved prompt records it. */
     original: '',
@@ -688,12 +691,14 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   const resultActions = createResultActions({
-    onRefine: kind => runRequest({ action: 'refine', kind, previous: state.latest, text: state.original }),
-    onCustomRefine: instruction => runRequest({
-      action: 'refine', kind: 'custom', instruction, previous: state.latest, text: state.original
+    onRefine: async kind => runRequest({
+      action: 'refine', kind, previous: state.latest, text: state.original, host: state.host || await activeTabHost()
     }),
-    onContinue: () => runRequest(
-      { action: 'refine', kind: 'continue', previous: state.latest, text: state.original },
+    onCustomRefine: async instruction => runRequest({
+      action: 'refine', kind: 'custom', instruction, previous: state.latest, text: state.original, host: state.host || await activeTabHost()
+    }),
+    onContinue: async () => runRequest(
+      { action: 'refine', kind: 'continue', previous: state.latest, text: state.original, host: state.host || await activeTabHost() },
       { base: state.latest }
     ),
     onUndo: () => {
@@ -710,6 +715,32 @@ document.addEventListener('DOMContentLoaded', async () => {
       return tab || null;
     } catch {
       return null;
+    }
+  }
+
+  async function activeTabHost() {
+    const tab = await activeTab();
+    if (!tab?.url) return null;
+    try {
+      const u = new URL(tab.url);
+      return u.protocol === 'https:' || u.protocol === 'http:' ? u.hostname : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async function refreshTargetBadge() {
+    const host = await activeTabHost();
+    state.host = host;
+    const profile = getTargetProfile(host);
+    if (profile) {
+      el.targetBadge.textContent = `For ${profile.name}`;
+      el.targetBadge.title = `Recognized ${profile.name} (${host}) — prompts are tailored for this AI`;
+      el.targetBadge.hidden = false;
+    } else {
+      el.targetBadge.hidden = true;
+      el.targetBadge.textContent = '';
+      el.targetBadge.title = '';
     }
   }
 
@@ -910,9 +941,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       return;
     }
     if (await blockedBySecret(text)) return;
-    const tab = await activeTab();
-    let host = null;
-    try { host = tab?.url ? new URL(tab.url).hostname : null; } catch { /* untargeted */ }
+    const host = (await activeTabHost()) || state.host || null;
+    state.host = host;
+    await refreshTargetBadge();
     await runRequest({
       action: 'optimize',
       text,
@@ -1309,6 +1340,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   }
   initSiteRow();
+  refreshTargetBadge();
 
   /* ------------------------------------------------------------ First run */
   function setOnboardingVisible(visible) {

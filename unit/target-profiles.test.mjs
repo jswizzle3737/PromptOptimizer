@@ -2,8 +2,11 @@ import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { installChromeStub } from './helpers.mjs';
 import {
-  getTargetProfile, buildExplanationChips, TARGET_PROFILES, TECHNIQUES
+  getTargetProfile, buildExplanationChips, TARGET_PROFILES, TECHNIQUES,
+  PLATFORM_INPUT_SELECTORS, GENERIC_INPUT_SELECTORS, COMPOSER_ANCHOR_SELECTORS,
+  getChatInputSelectors
 } from '../shared/target-profiles.js';
+import { hasIcon, icon } from '../shared/icons.js';
 import { generateOfflineOptimization, DEFAULT_FRAMEWORKS, analyzePromptSignals } from '../shared/frameworks.js';
 import { optimizePrompt, buildSystemPrompt } from '../shared/optimizer-engine.js';
 
@@ -19,14 +22,19 @@ test('every supported AI host resolves to its profile', () => {
   assert.equal(getTargetProfile('chatgpt.com').id, 'openai');
   assert.equal(getTargetProfile('chat.openai.com').id, 'openai');
   assert.equal(getTargetProfile('gemini.google.com').id, 'gemini');
+  assert.equal(getTargetProfile('aistudio.google.com').id, 'gemini');
+  assert.equal(getTargetProfile('perplexity.ai').id, 'perplexity');
   assert.equal(getTargetProfile('www.perplexity.ai').id, 'perplexity');
   assert.equal(getTargetProfile('chat.deepseek.com').id, 'deepseek');
+  assert.equal(getTargetProfile('grok.com').id, 'grok');
+  assert.equal(getTargetProfile('copilot.microsoft.com').id, 'copilot');
   assert.equal(getTargetProfile('chat.mistral.ai').id, 'mistral');
 });
 
 test('subdomains, full URLs, and mixed case still resolve', () => {
   assert.equal(getTargetProfile('labs.perplexity.ai').id, 'perplexity');
   assert.equal(getTargetProfile('https://chatgpt.com/c/abc-123').id, 'openai');
+  assert.equal(getTargetProfile('https://aistudio.google.com/prompts/new_chat').id, 'gemini');
   assert.equal(getTargetProfile('Claude.AI').id, 'claude');
 });
 
@@ -43,7 +51,33 @@ test('every profile carries guidance for both engine and offline paths', () => {
     assert.ok(p.id && p.name, 'profile needs id and name');
     assert.ok(p.systemGuidance?.length > 20, `${p.id} needs system guidance`);
     assert.ok(p.offlineNote?.length > 10, `${p.id} needs an offline note`);
+    assert.ok(Array.isArray(PLATFORM_INPUT_SELECTORS[p.id]) && PLATFORM_INPUT_SELECTORS[p.id].length > 0, `${p.id} needs input selectors`);
   }
+});
+
+test('getChatInputSelectors prioritizes recognized platform selectors before generic fallbacks', () => {
+  const geminiSelectors = getChatInputSelectors('gemini.google.com');
+  const aiStudioSelectors = getChatInputSelectors(getTargetProfile('aistudio.google.com'));
+  assert.deepEqual(geminiSelectors, aiStudioSelectors);
+  assert.equal(geminiSelectors[0], PLATFORM_INPUT_SELECTORS.gemini[0]);
+  for (const g of GENERIC_INPUT_SELECTORS) {
+    assert.ok(geminiSelectors.includes(g), `expected generic fallback ${g}`);
+  }
+  assert.equal(new Set(geminiSelectors).size, geminiSelectors.length, 'selectors must be deduplicated');
+
+  assert.deepEqual(getChatInputSelectors('example.com'), GENERIC_INPUT_SELECTORS);
+  assert.deepEqual(getChatInputSelectors(null), GENERIC_INPUT_SELECTORS);
+  assert.ok(
+    COMPOSER_ANCHOR_SELECTORS.indexOf('.input-area') < COMPOSER_ANCHOR_SELECTORS.indexOf('rich-textarea'),
+    'outer composer wrapper should precede rich-textarea so buttons inside .input-area are cleared'
+  );
+});
+
+test('star icon is registered for quick chat enhancement', () => {
+  assert.equal(hasIcon('star'), true);
+  const svg = icon('star', { size: 15 });
+  assert.match(svg, /<svg[^>]*>/);
+  assert.match(svg, /<path\b/);
 });
 
 /* ------------------------------------------------------------- chips */

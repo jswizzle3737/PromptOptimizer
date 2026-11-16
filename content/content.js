@@ -83,6 +83,70 @@
     .pc-trigger-pill:active { transform: translateY(0); }
     .pc-trigger-pill svg { color: var(--accent-fg); }
 
+    .pc-star-btn {
+      position: fixed;
+      pointer-events: auto;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      width: 34px;
+      height: 34px;
+      padding: 0;
+      background: var(--bg-raised);
+      color: var(--accent-fg);
+      border: 1px solid var(--accent-border);
+      border-radius: var(--radius-full);
+      box-shadow: var(--shadow-2);
+      cursor: pointer;
+      user-select: none;
+      z-index: 2147483646;
+      transition:
+        background-color var(--dur-fast) var(--ease-standard),
+        border-color var(--dur-fast) var(--ease-standard),
+        color var(--dur-fast) var(--ease-standard),
+        transform var(--dur-fast) var(--ease-standard),
+        box-shadow var(--dur-fast) var(--ease-standard);
+    }
+    .pc-star-btn:hover {
+      background: var(--accent-soft);
+      border-color: var(--accent);
+      transform: translateY(-1px) scale(1.04);
+      box-shadow: var(--shadow-accent);
+    }
+    .pc-star-btn:active { transform: translateY(0) scale(0.98); }
+    .pc-star-btn:focus-visible {
+      outline: 2px solid var(--border-focus);
+      outline-offset: 2px;
+    }
+    .pc-star-btn.is-busy {
+      background: var(--accent-soft);
+      border-color: var(--accent);
+      box-shadow: var(--shadow-accent);
+    }
+    .pc-star-btn.is-busy svg {
+      animation: pc-star-pulse 1.1s var(--ease-standard) infinite;
+    }
+    @keyframes pc-star-pulse {
+      0%, 100% { transform: scale(1) rotate(0deg); opacity: 1; }
+      50% { transform: scale(0.84) rotate(22deg); opacity: 0.65; }
+    }
+
+    .pc-toast { z-index: 2147483647; }
+    .pc-toast.has-action { pointer-events: auto; }
+    .pc-toast__action {
+      margin-left: var(--space-1);
+      padding: 2px var(--space-2);
+      border-radius: var(--radius-full);
+      border: 1px solid var(--accent-border);
+      background: var(--accent-soft);
+      color: var(--accent-fg);
+      font-size: var(--text-xs);
+      font-weight: var(--weight-semibold);
+      cursor: pointer;
+      transition: background-color var(--dur-fast) var(--ease-standard);
+    }
+    .pc-toast__action:hover { background: var(--accent-soft-hover); }
+
     .pc-backdrop {
       position: fixed;
       inset: 0;
@@ -130,6 +194,12 @@
       height: 26px;
       width: auto;
       filter: var(--logo-filter);
+    }
+
+    .pc-modal__title-row {
+      display: flex;
+      align-items: center;
+      gap: var(--space-2);
     }
 
     .pc-modal__title {
@@ -252,6 +322,7 @@
 
     @media (prefers-reduced-motion: reduce) {
       .pc-modal { animation: none; }
+      .pc-star-btn.is-busy svg { animation: none; }
     }
   `;
 
@@ -279,7 +350,7 @@
 
   async function loadModules() {
     try {
-      const [icons, select, themePicker, engines, saveSheet, library, runClient, assist, secrets, clarify, scorer] = await Promise.all([
+      const [icons, select, themePicker, engines, saveSheet, library, runClient, assist, secrets, clarify, scorer, targetProfiles] = await Promise.all([
         import(SHARED + 'icons.js'),
         import(SHARED + 'select.js'),
         import(SHARED + 'theme-picker.js'),
@@ -290,9 +361,10 @@
         import(SHARED + 'assist.js'),
         import(SHARED + 'secrets.js'),
         import(SHARED + 'clarify.js'),
-        import(SHARED + 'scorer.js')
+        import(SHARED + 'scorer.js'),
+        import(SHARED + 'target-profiles.js')
       ]);
-      return { icons, select, themePicker, engines, saveSheet, library, runClient, assist, secrets, clarify, scorer };
+      return { icons, select, themePicker, engines, saveSheet, library, runClient, assist, secrets, clarify, scorer, targetProfiles };
     } catch (err) {
       console.warn('[PromptOptimizer] enhanced controls unavailable, falling back:', err);
       return null;
@@ -336,13 +408,21 @@
       <span>Optimize</span>
     </button>
 
+    <button type="button" class="pc-star-btn" id="pc-star-btn"
+            aria-label="Auto-enhance prompt" title="Auto-enhance draft using your preconfigured setup">
+      <span data-icon="star" data-icon-size="15"></span>
+    </button>
+
     <div class="pc-backdrop" id="pc-backdrop">
       <div class="pc-modal" role="dialog" aria-modal="true" aria-labelledby="pc-modal-title">
         <header class="pc-modal__header">
           <div class="pc-modal__brand">
             <img class="pc-modal__logo" src="${LOGO_URL}" alt="">
             <div>
-              <div class="pc-modal__title" id="pc-modal-title">PromptOptimizer</div>
+              <div class="pc-modal__title-row">
+                <div class="pc-modal__title" id="pc-modal-title">PromptOptimizer</div>
+                <span class="pc-badge pc-badge--accent pc-badge--mono" id="pc-target-badge" hidden></span>
+              </div>
               <span class="pc-modal__subtitle">yourlegalaid</span>
             </div>
           </div>
@@ -464,8 +544,10 @@
     const $ = sel => root.querySelector(sel);
 
     const trigger = $('#pc-trigger');
+    const starBtn = $('#pc-star-btn');
     const backdrop = $('#pc-backdrop');
     const modal = $('.pc-modal');
+    const targetBadge = $('#pc-target-badge');
     const closeBtn = $('#pc-close-btn');
     const tabsContainer = $('#pc-tabs');
     const themeSlot = $('#pc-theme-slot');
@@ -512,6 +594,9 @@
     let activeFramework = 'smart-expand';
     let latest = '';
     let busy = false;
+    let quickBusy = false;
+    let quickRun = null;
+    let quickRunSeq = 0;
     /* What the result on screen came from, so a saved prompt records it. */
     let lastOriginal = '';
     let lastEngine = '';
@@ -529,6 +614,46 @@
 
     const ENGINE_LABELS = ds?.engines?.ENGINE_LABELS || {};
     const DEFAULT_ENGINE = ds?.engines?.DEFAULT_ENGINE || 'nano';
+
+    const FALLBACK_PROFILES = [
+      { id: 'claude', name: 'Claude', hosts: ['claude.ai'] },
+      { id: 'openai', name: 'ChatGPT', hosts: ['chatgpt.com', 'chat.openai.com'] },
+      { id: 'gemini', name: 'Gemini', hosts: ['gemini.google.com', 'aistudio.google.com'] },
+      { id: 'perplexity', name: 'Perplexity', hosts: ['perplexity.ai'] },
+      { id: 'deepseek', name: 'DeepSeek', hosts: ['chat.deepseek.com'] },
+      { id: 'grok', name: 'Grok', hosts: ['grok.com'] },
+      { id: 'copilot', name: 'Copilot', hosts: ['copilot.microsoft.com'] },
+      { id: 'mistral', name: 'Mistral', hosts: ['chat.mistral.ai'] }
+    ];
+
+    function resolveSiteProfile() {
+      if (ds?.targetProfiles?.getTargetProfile) {
+        return ds.targetProfiles.getTargetProfile(location.hostname);
+      }
+      const cleanHost = String(location.hostname || '').trim().toLowerCase().replace(/^www\./, '');
+      return FALLBACK_PROFILES.find(p => p.hosts.some(h => cleanHost === h || cleanHost.endsWith('.' + h))) || null;
+    }
+
+    function refreshPlatformIdentity() {
+      const profile = resolveSiteProfile();
+      if (profile) {
+        targetBadge.textContent = `For ${profile.name}`;
+        targetBadge.title = `Recognized ${profile.name} (${location.hostname}) — enhancements are tailored for this AI`;
+        targetBadge.hidden = false;
+      } else {
+        targetBadge.hidden = true;
+        targetBadge.textContent = '';
+        targetBadge.title = '';
+      }
+      if (!quickBusy) {
+        const label = profile
+          ? `Auto-enhance draft for ${profile.name} using your preconfigured setup`
+          : 'Auto-enhance draft using your preconfigured setup';
+        starBtn.title = label;
+        starBtn.setAttribute('aria-label', label);
+      }
+      return profile;
+    }
 
     /* Fields the pill and the modal may attach to or read from. Anything that
        can hold a credential is excluded: the modal copies a field's value into
@@ -568,18 +693,38 @@
       // No module: strip the placeholders so no raw text leaks into the UI.
       root.querySelectorAll('[data-icon]').forEach(el => el.remove());
       optimizeBtn.querySelector('span:last-child').textContent = 'Optimize';
+      if (starBtn && !starBtn.querySelector('svg')) starBtn.textContent = '★';
     }
 
     const ICON = (name, size = 14) => (ds?.icons ? ds.icons.icon(name, { size }) : '');
 
     /* Toast ------------------------------------------------------------ */
     let toastTimer;
-    function toast(msg, tone = 'neutral') {
+    function toast(msg, tone = 'neutral', { actionLabel = '', onAction = null, duration = 2400 } = {}) {
       const glyph = { success: 'check', danger: 'alert', neutral: 'info' }[tone] || 'info';
       toastEl.innerHTML = `${ICON(glyph, 13)}<span>${escapeHtml(msg)}</span>`;
+      if (actionLabel && typeof onAction === 'function') {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'pc-toast__action';
+        btn.textContent = actionLabel;
+        btn.addEventListener('mousedown', ev => ev.preventDefault());
+        btn.addEventListener('click', ev => {
+          ev.stopPropagation();
+          clearTimeout(toastTimer);
+          toastEl.classList.remove('is-visible', 'has-action');
+          onAction();
+        });
+        toastEl.appendChild(btn);
+        toastEl.classList.add('has-action');
+      } else {
+        toastEl.classList.remove('has-action');
+      }
       toastEl.classList.add('is-visible');
       clearTimeout(toastTimer);
-      toastTimer = setTimeout(() => toastEl.classList.remove('is-visible'), 2400);
+      toastTimer = setTimeout(() => {
+        toastEl.classList.remove('is-visible', 'has-action');
+      }, duration);
     }
 
     function setStatus(text, tone = 'neutral') {
@@ -731,6 +876,16 @@
       }
     }
 
+    async function getFrameworksList() {
+      try {
+        const stored = await chrome.storage.local.get('promptcraft_frameworks');
+        if (Array.isArray(stored.promptcraft_frameworks) && stored.promptcraft_frameworks.length) {
+          return stored.promptcraft_frameworks;
+        }
+      } catch {}
+      return FALLBACK_FRAMEWORKS;
+    }
+
     /* Only the design is written from a page. The service worker owns the write,
        so a page never rewrites the whole settings object (API keys included). */
     async function saveTheme(id) {
@@ -849,9 +1004,11 @@
       const active = document.activeElement;
       returnFocusTo = (isFieldLike(active) ? active : null) || currentTargetElement || active;
 
+      cancelQuickRun();
       isModalOpen = true;
       backdrop.classList.add('is-open');
-      trigger.style.display = 'none';
+      hideFloatingControls();
+      refreshPlatformIdentity();
 
       let stored = {};
       try {
@@ -914,6 +1071,13 @@
         }
       }
       returnFocusTo = null;
+      if (widgetEnabled) {
+        if (currentTargetElement?.isConnected && isEligibleField(currentTargetElement)) {
+          positionTrigger(currentTargetElement);
+        } else {
+          autoDetectAndPosition();
+        }
+      }
     }
 
     closeBtn.addEventListener('click', () => closeModal());
@@ -954,9 +1118,16 @@
       host.addEventListener(type, e => e.stopPropagation());
     });
 
+    trigger.addEventListener('mousedown', e => e.preventDefault());
     trigger.addEventListener('click', e => {
       e.stopPropagation();
       openModal(window.getSelection().toString().trim());
+    });
+
+    starBtn.addEventListener('mousedown', e => e.preventDefault());
+    starBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      autoEnhanceChatInput();
     });
 
     /* Requests from the service worker: the keyboard command and the context menu. */
@@ -1390,8 +1561,8 @@
     }
 
     /** Title, address (no query string) and any selection other than the draft. */
-    function pageContext(draft) {
-      if (!contextToggle.checked) return '';
+    function pageContext(draft, enabled = contextToggle.checked) {
+      if (!enabled) return '';
       const selection = window.getSelection().toString().trim();
       const lines = [`Page title: ${document.title}`, `URL: ${location.origin}${location.pathname}`];
       if (selection && selection !== draft.trim()) lines.push(`Selected text:\n${selection.slice(0, 2000)}`);
@@ -1427,6 +1598,151 @@
         runOptimization();
       }
     });
+
+    function setQuickBusy(next, statusHint = '') {
+      quickBusy = next;
+      starBtn.classList.toggle('is-busy', next);
+      starBtn.setAttribute('aria-busy', String(next));
+      if (next) {
+        const msg = statusHint || 'Enhancing draft';
+        starBtn.title = `${msg} (click to cancel)`;
+        starBtn.setAttribute('aria-label', `${msg} (click to cancel)`);
+      } else {
+        refreshPlatformIdentity();
+      }
+    }
+
+    function cancelQuickRun() {
+      quickRunSeq += 1;
+      const activeRun = quickRun;
+      quickRun = null;
+      activeRun?.cancel?.();
+      if (quickBusy) setQuickBusy(false);
+    }
+
+    async function autoEnhanceChatInput() {
+      if (quickBusy) {
+        cancelQuickRun();
+        toast('Quick enhance cancelled', 'neutral');
+        return;
+      }
+      if (busy) return;
+
+      const active = document.activeElement;
+      if (isFieldLike(active) && !isEligibleField(active)) {
+        hideFloatingControls();
+        return;
+      }
+
+      const target = (currentTargetElement?.isConnected && isEligibleField(currentTargetElement) && currentTargetElement)
+        || fieldFrom(active)
+        || findChatInput();
+      if (!target) {
+        toast('Open or focus a chat box first', 'danger');
+        return;
+      }
+
+      const raw = getElementValue(target);
+      const trimmed = raw.trim();
+      if (!trimmed) {
+        toast('Type a prompt in the chat box first', 'neutral');
+        target.focus?.({ preventScroll: true });
+        return;
+      }
+
+      const profile = resolveSiteProfile();
+      const targetHint = profile ? ` for ${profile.name}` : '';
+      const seq = ++quickRunSeq;
+      setQuickBusy(true, `Enhancing draft${targetHint}…`);
+
+      let data = null;
+      try {
+        const [settings, frameworks] = await Promise.all([getSettings(), getFrameworksList()]);
+        if (seq !== quickRunSeq) return;
+
+        const preEngine = settings.preferredEngine || DEFAULT_ENGINE;
+        const preFramework = settings.preferredFramework && frameworks.some(f => f.id === settings.preferredFramework)
+          ? settings.preferredFramework
+          : (frameworks[0]?.id || 'smart-expand');
+
+        if (ds?.secrets) {
+          const warning = ds.secrets.secretWarning(trimmed, preEngine, settings);
+          if (warning && secretAllowedFor !== trimmed) {
+            setQuickBusy(false);
+            toast('Review secret warning before sending', 'danger');
+            await openModal(trimmed);
+            secretNotice?.show(warning);
+            return;
+          }
+        }
+
+        const payload = {
+          action: 'optimize',
+          text: trimmed,
+          engine: preEngine,
+          frameworkId: preFramework,
+          variantCount: 1,
+          context: pageContext(trimmed, Boolean(settings.includePageContext)),
+          host: location.hostname
+        };
+
+        if (ds?.runClient) {
+          quickRun = ds.runClient.startRun(payload, {
+            onStart: (usedEngine, usedModel) => {
+              if (seq !== quickRunSeq) return;
+              const name = ENGINE_LABELS[usedEngine] || usedEngine;
+              const via = usedModel ? `${name} (${usedModel})` : name;
+              setQuickBusy(true, `Enhancing${targetHint} via ${via}…`);
+            }
+          });
+          data = await quickRun.promise;
+        } else {
+          data = await sendOnce(payload);
+        }
+      } catch (err) {
+        if (seq === quickRunSeq) {
+          toast(err?.message || 'Quick enhance failed', 'danger');
+        }
+        return;
+      } finally {
+        if (seq === quickRunSeq) {
+          quickRun = null;
+          setQuickBusy(false);
+        }
+      }
+
+      if (seq !== quickRunSeq || !data?.optimized) return;
+
+      const writeTarget = (target.isConnected && isEligibleField(target) && target) || findChatInput();
+      const beforeInsert = writeTarget ? (getElementValue(writeTarget) || raw) : raw;
+      if (writeTarget && insertTextIntoElement(writeTarget, data.optimized)) {
+        currentTargetElement = writeTarget;
+        positionTrigger(writeTarget);
+        const engineLabel = ENGINE_LABELS[data.engine] || data.engine || '';
+        const msg = data.degraded
+          ? (profile ? `Enhanced for ${profile.name} (offline fallback)` : 'Enhanced with offline fallback')
+          : (profile
+            ? `Enhanced for ${profile.name}${engineLabel ? ` · ${engineLabel}` : ''}`
+            : `Prompt enhanced${engineLabel ? ` · ${engineLabel}` : ''}`);
+        toast(msg, data.degraded ? 'neutral' : 'success', {
+          actionLabel: 'Undo',
+          duration: 6000,
+          onAction: () => {
+            const undoTarget = (writeTarget?.isConnected && isEligibleField(writeTarget) && writeTarget) || findChatInput();
+            if (undoTarget && insertTextIntoElement(undoTarget, beforeInsert)) {
+              currentTargetElement = undoTarget;
+              positionTrigger(undoTarget);
+              toast('Restored original draft', 'neutral');
+            } else {
+              toast('Could not restore original draft', 'danger');
+            }
+          }
+        });
+      } else {
+        try { await navigator.clipboard.writeText(data.optimized); } catch {}
+        toast('Could not update chat box — copied instead', 'danger');
+      }
+    }
 
     /* Secret warning, Ask me first, page context ------------------------ */
     const secretNotice = ds?.assist
@@ -1715,20 +2031,106 @@
     }
 
     /* Trigger positioning ---------------------------------------------- */
+    const FALLBACK_INPUT_SELECTORS = [
+      '#prompt-textarea',
+      '[role="textbox"][contenteditable="true"]',
+      'div[contenteditable="true"]',
+      'textarea'
+    ];
+    const FALLBACK_COMPOSER_SELECTORS = [
+      '[data-testid*="composer" i]',
+      '[class*="composer" i]',
+      '.input-area',
+      '.text-input-field',
+      'fieldset',
+      'form',
+      '[data-testid*="chat-input" i]',
+      'rich-textarea'
+    ];
+
+    function isVisibleElement(el) {
+      if (!el || !el.isConnected) return false;
+      const cs = getComputedStyle(el);
+      if (cs.display === 'none' || cs.visibility === 'hidden' || parseFloat(cs.opacity) === 0) {
+        return false;
+      }
+      const r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0;
+    }
+
+    function findComposerAnchor(targetEl) {
+      if (!targetEl || !targetEl.isConnected) return targetEl;
+      const tRect = targetEl.getBoundingClientRect();
+      if (tRect.width === 0 && tRect.height === 0) return targetEl;
+
+      const isReasonableContainer = el => {
+        if (!el || el === document.body || el === document.documentElement || el.tagName === 'MAIN') return false;
+        const cs = getComputedStyle(el);
+        if ((cs.overflowY === 'auto' || cs.overflowY === 'scroll') && el.scrollHeight > el.clientHeight + 40) {
+          return false;
+        }
+        const r = el.getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0) return false;
+        if (r.height > Math.max(tRect.height + 180, 280)) return false;
+        if (r.width > tRect.width + 280) return false;
+        return r.width >= tRect.width - 4 && r.height >= tRect.height - 4;
+      };
+
+      const anchorSelectors = ds?.targetProfiles?.COMPOSER_ANCHOR_SELECTORS || FALLBACK_COMPOSER_SELECTORS;
+      for (const sel of anchorSelectors) {
+        try {
+          const matched = targetEl.closest(sel);
+          if (matched && matched !== targetEl && isReasonableContainer(matched)) {
+            return matched;
+          }
+        } catch {}
+      }
+
+      let best = targetEl;
+      let cur = targetEl.parentElement;
+      for (let depth = 0; cur && depth < 5; depth += 1, cur = cur.parentElement) {
+        if (cur === document.body || cur === document.documentElement || cur.tagName === 'MAIN') break;
+        if (!isReasonableContainer(cur)) continue;
+        const cs = getComputedStyle(cur);
+        const hasChrome =
+          parseFloat(cs.borderTopWidth) > 0 ||
+          parseFloat(cs.borderRadius) >= 8 ||
+          (cs.backgroundColor && cs.backgroundColor !== 'rgba(0, 0, 0, 0)' && cs.backgroundColor !== 'transparent');
+        if (hasChrome) best = cur;
+      }
+      return best;
+    }
+
     let targetResizeObserver = null;
     let observedTarget = null;
+    let observedAnchor = null;
+    let positionRafId = 0;
+
+    function hideFloatingControls() {
+      if (positionRafId) {
+        cancelAnimationFrame(positionRafId);
+        positionRafId = 0;
+      }
+      trigger.style.display = 'none';
+      starBtn.style.display = 'none';
+    }
+
     const reposition = () => {
       if (currentTargetElement && !isModalOpen) positionTrigger(currentTargetElement);
     };
 
-    function observeTarget(el) {
-      if (el === observedTarget) return;
+    function observeTarget(targetEl, anchorEl) {
+      const nextTarget = targetEl && targetEl.isConnected ? targetEl : null;
+      const nextAnchor = anchorEl && anchorEl.isConnected && anchorEl !== nextTarget ? anchorEl : null;
+      if (nextTarget === observedTarget && nextAnchor === observedAnchor) return;
       targetResizeObserver?.disconnect();
-      observedTarget = el && el.isConnected ? el : null;
+      observedTarget = nextTarget;
+      observedAnchor = nextAnchor;
       if (!observedTarget || typeof ResizeObserver !== 'function') return;
       try {
         targetResizeObserver ??= new ResizeObserver(reposition);
         targetResizeObserver.observe(observedTarget);
+        if (observedAnchor) targetResizeObserver.observe(observedAnchor);
       } catch {}
     }
 
@@ -1737,52 +2139,112 @@
       // Nothing shows while focus sits in a field we must not serve (a password
       // box, say) — including when a delayed re-scan fires with it focused.
       const active = document.activeElement;
-      if (!widgetEnabled || !targetEl.isConnected || (isFieldLike(active) && !isEligibleField(active))) {
-        trigger.style.display = 'none';
+      if (!widgetEnabled || !targetEl.isConnected || !isEligibleField(targetEl) || (isFieldLike(active) && !isEligibleField(active))) {
+        hideFloatingControls();
         return;
       }
       const style = getComputedStyle(targetEl);
       if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity) === 0) {
-        trigger.style.display = 'none';
+        hideFloatingControls();
         return;
       }
-      observeTarget(targetEl);
       const rect = targetEl.getBoundingClientRect();
       if ((rect.width === 0 && rect.height === 0) ||
           rect.bottom <= 0 ||
           rect.top >= window.innerHeight ||
           rect.right <= 0 ||
           rect.left >= window.innerWidth) {
-        trigger.style.display = 'none';
+        hideFloatingControls();
         return;
       }
 
-      let rawTop;
-      if (rect.top >= 46) {
-        rawTop = rect.top - 36;
-      } else if (rect.bottom + 8 <= window.innerHeight - 36) {
-        rawTop = rect.bottom + 8;
-      } else {
-        rawTop = Math.max(8, rect.top + 8);
-      }
-      const top = Math.max(8, Math.min(window.innerHeight - 36, rawTop));
-      const left = Math.min(window.innerWidth - 140, Math.max(10, rect.right - 132));
+      const anchorEl = findComposerAnchor(targetEl);
+      observeTarget(targetEl, anchorEl);
+      const anchorRect = anchorEl && anchorEl !== targetEl && isVisibleElement(anchorEl)
+        ? anchorEl.getBoundingClientRect()
+        : null;
+      const visRect = anchorRect &&
+        anchorRect.bottom > 0 &&
+        anchorRect.top < window.innerHeight &&
+        anchorRect.right > 0 &&
+        anchorRect.left < window.innerWidth
+        ? anchorRect
+        : rect;
 
-      requestAnimationFrame(() => {
-        if (isModalOpen || !targetEl.isConnected) return;
-        trigger.style.top = `${top}px`;
-        trigger.style.left = `${left}px`;
+      const pillW = 124;
+      const pillH = 28;
+      let rawPillTop;
+      if (visRect.top >= 46) {
+        rawPillTop = visRect.top - 36;
+      } else if (visRect.bottom + 8 <= window.innerHeight - 36) {
+        rawPillTop = visRect.bottom + 8;
+      } else {
+        rawPillTop = Math.max(8, visRect.top + 8);
+      }
+      const pillTop = Math.round(Math.max(8, Math.min(window.innerHeight - 36, rawPillTop)));
+      let pillLeft = Math.round(Math.min(window.innerWidth - 140, Math.max(10, visRect.right - 132)));
+
+      const starSize = 34;
+      const hasRoomRight = (window.innerWidth - visRect.right) >= 48;
+      const starLeft = hasRoomRight
+        ? Math.round(Math.min(window.innerWidth - starSize - 8, visRect.right + 10))
+        : Math.round(Math.min(window.innerWidth - starSize - 8, Math.max(8, visRect.right - starSize - 8)));
+
+      let starTop;
+      if (hasRoomRight) {
+        const centered = visRect.top + (visRect.height - starSize) / 2;
+        const minTop = visRect.top + 4;
+        const maxTop = Math.max(minTop, visRect.bottom - starSize - 4);
+        const clampedToBox = visRect.height <= starSize + 12
+          ? centered
+          : Math.max(minTop, Math.min(maxTop, centered));
+        starTop = Math.round(Math.max(8, Math.min(window.innerHeight - starSize - 8, clampedToBox)));
+      } else {
+        const insideTop = visRect.height >= 48 ? visRect.top + 8 : visRect.top + (visRect.height - starSize) / 2;
+        starTop = Math.round(Math.max(8, Math.min(window.innerHeight - starSize - 8, insideTop)));
+      }
+
+      const overlapY = pillTop < starTop + starSize + 4 && pillTop + pillH + 4 > starTop;
+      const overlapX = pillLeft < starLeft + starSize + 6 && pillLeft + pillW + 6 > starLeft;
+      if (overlapY && overlapX) {
+        pillLeft = Math.round(Math.max(8, starLeft - pillW - 8));
+      }
+
+      if (positionRafId) cancelAnimationFrame(positionRafId);
+      positionRafId = requestAnimationFrame(() => {
+        positionRafId = 0;
+        const activeNow = document.activeElement;
+        if (isModalOpen || !widgetEnabled || !targetEl.isConnected || (isFieldLike(activeNow) && !isEligibleField(activeNow))) {
+          return;
+        }
+        trigger.style.top = `${pillTop}px`;
+        trigger.style.left = `${pillLeft}px`;
         trigger.style.display = 'flex';
+
+        starBtn.style.top = `${starTop}px`;
+        starBtn.style.left = `${starLeft}px`;
+        starBtn.style.display = 'flex';
       });
     }
 
-    /** The field the user most plausibly means: the focused one, else the first chat-like box. */
+    /** The field the user most plausibly means: the focused one, else the first visible chat-like box. */
     function findChatInput() {
       const focused = fieldFrom(document.activeElement);
       if (focused) return focused;
-      for (const selector of ['#prompt-textarea', 'div[contenteditable="true"]', 'textarea']) {
-        const el = document.querySelector(selector);
-        if (isEligibleField(el)) return el;
+      const profile = resolveSiteProfile();
+      const selectors = ds?.targetProfiles?.getChatInputSelectors
+        ? ds.targetProfiles.getChatInputSelectors(profile)
+        : FALLBACK_INPUT_SELECTORS;
+      for (const selector of selectors) {
+        let matches = [];
+        try {
+          matches = document.querySelectorAll(selector);
+        } catch {
+          continue;
+        }
+        for (const el of matches) {
+          if (isEligibleField(el) && isVisibleElement(el)) return el;
+        }
       }
       return null;
     }
@@ -1793,19 +2255,21 @@
         currentTargetElement = input;
         positionTrigger(input);
       } else {
-        trigger.style.display = 'none';
+        hideFloatingControls();
       }
     }
 
     /* Pages mutate constantly. Re-scan at most every 400 ms, and only when the
-       field we were tracking is gone. */
+       field we were tracking is gone or no longer visible. */
     let scanTimer = 0;
     function scheduleScan() {
       if (scanTimer) return;
       scanTimer = setTimeout(() => {
         scanTimer = 0;
         ensureHost();
-        if (!currentTargetElement?.isConnected) autoDetectAndPosition();
+        if (!currentTargetElement?.isConnected || !isEligibleField(currentTargetElement) || !isVisibleElement(currentTargetElement)) {
+          autoDetectAndPosition();
+        }
       }, 400);
     }
 
@@ -1819,9 +2283,9 @@
         currentTargetElement = el;
         positionTrigger(el);
       } else if (isFieldLike(e.target)) {
-        // Focus moved into a field we do not serve (a password box): the pill
-        // must not stay pointing at the previous one.
-        trigger.style.display = 'none';
+        // Focus moved into a field we do not serve (a password box): floating
+        // controls must not stay pointing at the previous one.
+        hideFloatingControls();
       }
     }, true);
 
@@ -1853,8 +2317,12 @@
       if (typeof next?.includePageContext === 'boolean') contextToggle.checked = next.includePageContext;
       if (next && (next.enableFloatingWidget !== false) !== widgetEnabled) {
         widgetEnabled = next.enableFloatingWidget !== false;
-        if (widgetEnabled) autoDetectAndPosition();
-        else trigger.style.display = 'none';
+        if (widgetEnabled) {
+          autoDetectAndPosition();
+        } else {
+          cancelQuickRun();
+          hideFloatingControls();
+        }
       }
     });
 
@@ -1871,6 +2339,7 @@
       setVariantCount(settings.variantCount);
       contextToggle.checked = Boolean(settings.includePageContext);
       if (settings.preferredFramework) activeFramework = settings.preferredFramework;
+      refreshPlatformIdentity();
       await renderFrameworkTabs({ frameworks: stored.promptcraft_frameworks, settings });
 
       if (widgetEnabled) {
