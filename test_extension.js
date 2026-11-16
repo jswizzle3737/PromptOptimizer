@@ -158,10 +158,9 @@ function createCdpClient(wsUrl) {
 }
 
 /**
- * Copy the shipped extension into a temp directory and add the mock chat host to
- * the content-script match list. The shipped manifest only lists real AI sites,
- * and the mock page is served from 127.0.0.1. Nothing but that one match differs
- * from what ships.
+ * Copy the shipped extension into a temp directory and add the mock chat/AI host to
+ * the manifest permissions. The shipped manifest only lists real AI sites and cloud
+ * APIs, and the mock server runs on 127.0.0.1. Nothing else differs from what ships.
  */
 function prepareTestExtension() {
   const dest = `${TEMP_USER_DATA}-ext`;
@@ -174,6 +173,7 @@ function prepareTestExtension() {
   const manifestPath = path.join(dest, 'manifest.json');
   const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
   manifest.content_scripts[0].matches.push('http://127.0.0.1/*');
+  manifest.host_permissions = [...(manifest.host_permissions || []), 'http://127.0.0.1/*'];
   fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
   return dest;
 }
@@ -1486,12 +1486,103 @@ async function runTests() {
     }
     console.log('✓ Options history list/search/delete and export buttons verified');
 
+    // Quick-repair Step 1 toggle in Options
+    const qrRes = await optionsClient.send('Runtime.evaluate', {
+      awaitPromise: true,
+      returnByValue: true,
+      expression: `(async () => {
+        const wait = ms => new Promise(r => setTimeout(r, ms));
+        const toggle = document.getElementById('quick-repair-enabled');
+        const initialChecked = toggle.checked;
+        toggle.click();
+        document.getElementById('save-btn').click();
+        await wait(350);
+        const afterUncheck = await new Promise(r => chrome.storage.local.get('promptcraft_settings', x => r(x.promptcraft_settings?.quickRepairEnabled)));
+        toggle.click();
+        document.getElementById('save-btn').click();
+        await wait(350);
+        const afterRecheck = await new Promise(r => chrome.storage.local.get('promptcraft_settings', x => r(x.promptcraft_settings?.quickRepairEnabled)));
+        return { initialChecked, afterUncheck, afterRecheck };
+      })()`
+    });
+    const qrr = qrRes.result.value;
+    if (qrr.initialChecked !== true || qrr.afterUncheck !== false || qrr.afterRecheck !== true) {
+      throw new Error(`Options quick-repair toggle check failed: ${JSON.stringify(qrr)}`);
+    }
+    console.log('✓ Options quick-repair Step 1 toggle persistence verified');
+
     optionsClient.close();
 
     // 6. Test Content Script & Floating In-Page Widget
     console.log('\n[6/6] Testing Content Script & In-Page Floating Widget on Mock Chat Interface...');
     const http = require('http');
+    const pendingMockTimers = new Set();
     const server = http.createServer((req, res) => {
+      if (req.method === 'POST' && req.url === '/v1/chat/completions') {
+        let body = '';
+        req.on('data', chunk => { body += chunk; });
+        req.on('end', () => {
+          let sys = '';
+          let userMsg = '';
+          try {
+            const parsed = JSON.parse(body || '{}');
+            const msgs = Array.isArray(parsed.messages) ? parsed.messages : [];
+            sys = String(msgs.find(m => m.role === 'system')?.content || '');
+            userMsg = String(msgs.find(m => m.role === 'user')?.content || '');
+          } catch {}
+          const rawMatch = userMsg.match(/<raw_prompt>\n?([\s\S]*?)\n?<\/raw_prompt>/);
+          const draft = (rawMatch ? rawMatch[1] : userMsg).trim();
+          const isRepair = sys.includes('copy-editor repairing');
+
+          const respondJson = (content, delayMs = 0) => {
+            const sendPayload = () => {
+              if (res.writableEnded || res.destroyed) return;
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ choices: [{ message: { content } }] }));
+            };
+            if (delayMs > 0) {
+              const t = setTimeout(() => {
+                pendingMockTimers.delete(t);
+                sendPayload();
+              }, delayMs);
+              pendingMockTimers.add(t);
+              const cancelTimer = () => { clearTimeout(t); pendingMockTimers.delete(t); };
+              res.on('close', cancelTimer);
+            } else {
+              sendPayload();
+            }
+          };
+
+          if (isRepair) {
+            if (draft.includes('__SLOW_STEP1__')) {
+              respondJson(draft, 1500);
+              return;
+            }
+            if (draft === '__SLOW_STEP2__ helo wrld') {
+              respondJson('__SLOW_STEP2__ hello world', 0);
+              return;
+            }
+            if (draft === 'wrte a tst for lgoin') {
+              respondJson('write a test for login', 0);
+              return;
+            }
+            respondJson(draft, 0);
+            return;
+          }
+
+          if (draft.includes('__SLOW_STEP2__')) {
+            respondJson(`ENHANCED_MOCK: ${draft}`, 1500);
+            return;
+          }
+          if (draft.includes('__SLOW_EDIT__')) {
+            respondJson(`ENHANCED_MOCK: ${draft}`, 400);
+            return;
+          }
+          respondJson(`ENHANCED_MOCK: ${draft}`, 0);
+        });
+        return;
+      }
+
       res.writeHead(200, { 'Content-Type': 'text/html' });
       if (req.url && req.url.startsWith('/composer')) {
         res.end(`
@@ -2155,6 +2246,243 @@ async function runTests() {
       }
       console.log('✓ Composer anchor skipped hidden textarea, cleared Send button on far right, and enhanced/undid contenteditable draft');
 
+      // Submit auto-reset on /composer: enhance then click Send clearing composer resets star button to idle
+      const ceSubmitReset = await evalInIsolated(`(async () => {
+        const wait = ms => new Promise(r => setTimeout(r, ms));
+        const until = async (fn, ms = 8000) => { const t = Date.now(); while (Date.now() - t < ms) { const v = fn(); if (v) return v; await wait(60); } return null; };
+        const ce = document.getElementById('ce-input');
+        const sendBtn = document.getElementById('send-btn');
+        const shadow = document.getElementById('promptcraft-root-host').shadowRoot;
+        const star = shadow.querySelector('#pc-star-btn');
+        ce.textContent = 'submit reset check';
+        ce.focus();
+        await wait(150);
+        star.click();
+        const becameEnhanced = await until(() => star.dataset.state === 'enhanced');
+        ce.textContent = '';
+        sendBtn.click();
+        const resetIdle = await until(() => star.dataset.state === 'idle' && !star.classList.contains('is-revert'), 2000);
+        return { becameEnhanced: Boolean(becameEnhanced), resetIdle: Boolean(resetIdle), finalState: star.dataset.state };
+      })()`, true);
+      const csr = ceSubmitReset.result.value;
+      if (!csr.becameEnhanced || !csr.resetIdle || csr.finalState !== 'idle') {
+        throw new Error(`Submit auto-reset check failed: ${JSON.stringify(csr)}`);
+      }
+      console.log('✓ Send click clearing composer automatically resets star button back to idle');
+
+      // Navigate back to /chat and test full two-stage Repair -> Enhance, Alt+Click, in-button Revert, Cancel & Guards
+      console.log('→ Testing two-stage Repair -> Enhance pipeline, Alt+Click, in-button Revert, mid-flight Cancel & Snapshot Guards...');
+      isolatedContextId = null;
+      await pageClient.send('Page.navigate', { url: 'http://127.0.0.1:8765/chat' });
+      for (let i = 0; i < 50 && !isolatedContextId; i++) await sleep(100);
+      await sleep(500);
+
+      const twoStageRes = await evalInIsolated(`(async () => {
+        const wait = ms => new Promise(r => setTimeout(r, ms));
+        const until = async (fn, ms = 8000) => { const t = Date.now(); while (Date.now() - t < ms) { const v = fn(); if (v) return v; await wait(40); } return null; };
+        const stored = await chrome.storage.local.get('promptcraft_settings');
+        const baseSettings = stored.promptcraft_settings || {};
+        await chrome.storage.local.set({
+          promptcraft_settings: {
+            ...baseSettings,
+            preferredEngine: 'omniroute',
+            omnirouteEnabled: true,
+            omnirouteBaseUrl: 'http://127.0.0.1:8765/v1',
+            preferredFramework: 'rtf',
+            quickRepairEnabled: true,
+            enableFloatingWidget: true
+          }
+        });
+        await wait(250);
+
+        const ta = document.getElementById('prompt-textarea');
+        const shadow = await until(() => document.getElementById('promptcraft-root-host')?.shadowRoot);
+        const star = await until(() => shadow.querySelector('#pc-star-btn'));
+        const toastEl = shadow.querySelector('#pc-toast');
+        ta.focus();
+        await wait(200);
+
+        // 1. Two-stage Repair -> Enhance + In-Button Revert (enhanced -> idle)
+        const typoDraft = 'wrte a tst for lgoin';
+        ta.value = typoDraft;
+        star.click();
+        const enhancedDone = await until(() => star.dataset.state === 'enhanced' && ta.value === 'ENHANCED_MOCK: write a test for login');
+        const enhancedState = {
+          state: star.dataset.state,
+          hasRevertClass: star.classList.contains('is-revert'),
+          hasSvg: Boolean(star.querySelector('svg')),
+          toastUndo: Boolean(shadow.querySelector('.pc-toast__action')),
+          value: ta.value
+        };
+        star.click(); // In-button ↩ revert
+        const revertedIdle = await until(() => star.dataset.state === 'idle');
+        const afterButtonRevert = {
+          revertedIdle: Boolean(revertedIdle),
+          state: star.dataset.state,
+          hasRevertClass: star.classList.contains('is-revert'),
+          value: ta.value
+        };
+
+        // 2. Alt+Click Repair-Only + In-Button Revert (repaired -> idle)
+        ta.value = typoDraft;
+        star.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, altKey: true }));
+        const repairOnlyDone = await until(() => star.dataset.state === 'repaired' && ta.value === 'write a test for login');
+        const repairOnlyState = {
+          done: Boolean(repairOnlyDone),
+          state: star.dataset.state,
+          hasRevertClass: star.classList.contains('is-revert'),
+          hasSvg: Boolean(star.querySelector('svg')),
+          toastText: toastEl.textContent.trim(),
+          value: ta.value
+        };
+        star.click(); // In-button ↩ revert
+        await until(() => star.dataset.state === 'idle');
+        const repairOnlyReverted = ta.value;
+
+        // 3. Fast Step 1 + Slow Step 2 -> Mid-flight Cancel keeps Step 1 repair in repaired (↩) state -> Revert
+        const slowStep2Orig = '__SLOW_STEP2__ helo wrld';
+        ta.value = slowStep2Orig;
+        star.click();
+        const reachedStep2Busy = await until(() =>
+          star.dataset.state === 'enhancing' &&
+          star.classList.contains('is-busy') &&
+          Boolean(star.querySelector('.pc-spinner')) &&
+          ta.value === '__SLOW_STEP2__ hello world'
+        );
+        const valueAtStep2Busy = ta.value;
+        star.click(); // Cancel Step 2 in flight
+        const cancelledKeptRepair = await until(() => star.dataset.state === 'repaired' && !star.classList.contains('is-busy'));
+        const midCancelToast = toastEl.textContent.trim();
+        await wait(150);
+        const valueAfterStep2Cancel = ta.value;
+        star.click(); // Revert Step 1 back to original
+        await until(() => star.dataset.state === 'idle');
+        await wait(200);
+        const valueAfterStep1Revert = ta.value;
+
+        // 4. Slow Step 1 Cancel -> resets directly to idle without overwrite
+        const slowStep1Orig = '__SLOW_STEP1__ draft';
+        ta.value = slowStep1Orig;
+        star.click();
+        const reachedStep1Busy = await until(() => star.dataset.state === 'repairing' && star.classList.contains('is-busy'));
+        star.click();
+        const step1CancelIdle = await until(() => star.dataset.state === 'idle' && !star.classList.contains('is-busy'));
+        const step1CancelVal = ta.value;
+
+        // 5. Mid-flight composer edit snapshot guard aborts Step 2 overwrite
+        await chrome.storage.local.set({
+          promptcraft_settings: { ...baseSettings, preferredEngine: 'omniroute', omnirouteEnabled: true, omnirouteBaseUrl: 'http://127.0.0.1:8765/v1', quickRepairEnabled: false, enableFloatingWidget: true }
+        });
+        await wait(120);
+        ta.value = '__SLOW_EDIT__ base prompt';
+        star.click();
+        await until(() => star.dataset.state === 'enhancing' && star.classList.contains('is-busy'));
+        await wait(50);
+        ta.value = '__SLOW_EDIT__ base prompt + user typed';
+        ta.dispatchEvent(new Event('input', { bubbles: true }));
+        const snapshotAbortedIdle = await until(() => star.dataset.state === 'idle' && /kept your edit/i.test(toastEl.textContent));
+        const snapshotPreservedValue = ta.value;
+
+        // 6. > 8000 char refusal + Clear-composer auto-reset
+        await chrome.storage.local.set({
+          promptcraft_settings: { ...baseSettings, preferredEngine: 'omniroute', omnirouteEnabled: true, omnirouteBaseUrl: 'http://127.0.0.1:8765/v1', quickRepairEnabled: true, enableFloatingWidget: true }
+        });
+        await wait(120);
+        ta.value = 'a'.repeat(8001);
+        star.click();
+        await wait(120);
+        const overLimitState = {
+          state: star.dataset.state,
+          toastText: toastEl.textContent.trim(),
+          len: ta.value.length
+        };
+
+        ta.value = 'reset on clear draft';
+        star.click();
+        const readyToClear = await until(() => star.dataset.state === 'enhanced');
+        ta.value = '';
+        ta.dispatchEvent(new Event('input', { bubbles: true }));
+        const clearedIdle = await until(() => star.dataset.state === 'idle' && !star.classList.contains('is-revert'));
+
+        // Restore clean offline settings
+        await chrome.storage.local.set({
+          promptcraft_settings: { ...baseSettings, preferredEngine: 'offline', preferredFramework: 'rtf', quickRepairEnabled: true }
+        });
+
+        return {
+          enhancedDone: Boolean(enhancedDone),
+          enhancedState,
+          afterButtonRevert,
+          repairOnlyState,
+          repairOnlyReverted,
+          reachedStep2Busy: Boolean(reachedStep2Busy),
+          valueAtStep2Busy,
+          cancelledKeptRepair: Boolean(cancelledKeptRepair),
+          midCancelToast,
+          valueAfterStep2Cancel,
+          valueAfterStep1Revert,
+          slowStep2Orig,
+          reachedStep1Busy: Boolean(reachedStep1Busy),
+          step1CancelIdle: Boolean(step1CancelIdle),
+          step1CancelVal,
+          slowStep1Orig,
+          snapshotAbortedIdle: Boolean(snapshotAbortedIdle),
+          snapshotPreservedValue,
+          overLimitState,
+          readyToClear: Boolean(readyToClear),
+          clearedIdle: Boolean(clearedIdle)
+        };
+      })()`, true);
+      const tsr = twoStageRes.result.value;
+      if (
+        !tsr.enhancedDone ||
+        tsr.enhancedState.state !== 'enhanced' ||
+        !tsr.enhancedState.hasRevertClass ||
+        !tsr.enhancedState.hasSvg ||
+        !tsr.enhancedState.toastUndo ||
+        !tsr.afterButtonRevert.revertedIdle ||
+        tsr.afterButtonRevert.state !== 'idle' ||
+        tsr.afterButtonRevert.hasRevertClass ||
+        tsr.afterButtonRevert.value !== 'wrte a tst for lgoin'
+      ) {
+        throw new Error(`Two-stage Repair -> Enhance / in-button Revert failed: ${JSON.stringify(tsr)}`);
+      }
+      if (
+        !tsr.repairOnlyState.done ||
+        tsr.repairOnlyState.state !== 'repaired' ||
+        !tsr.repairOnlyState.hasRevertClass ||
+        !tsr.repairOnlyState.hasSvg ||
+        !/Typos repaired/i.test(tsr.repairOnlyState.toastText) ||
+        tsr.repairOnlyState.value !== 'write a test for login' ||
+        tsr.repairOnlyReverted !== 'wrte a tst for lgoin'
+      ) {
+        throw new Error(`Alt+Click repair-only / revert failed: ${JSON.stringify(tsr)}`);
+      }
+      if (
+        !tsr.reachedStep2Busy ||
+        tsr.valueAtStep2Busy !== '__SLOW_STEP2__ hello world' ||
+        !tsr.cancelledKeptRepair ||
+        !/typo fixes kept/i.test(tsr.midCancelToast) ||
+        tsr.valueAfterStep2Cancel !== '__SLOW_STEP2__ hello world' ||
+        tsr.valueAfterStep1Revert !== tsr.slowStep2Orig
+      ) {
+        throw new Error(`Mid-flight Step 2 cancel keeping Step 1 repair failed: ${JSON.stringify(tsr)}`);
+      }
+      if (
+        !tsr.reachedStep1Busy ||
+        !tsr.step1CancelIdle ||
+        tsr.step1CancelVal !== tsr.slowStep1Orig ||
+        !tsr.snapshotAbortedIdle ||
+        tsr.snapshotPreservedValue !== '__SLOW_EDIT__ base prompt + user typed' ||
+        tsr.overLimitState.state !== 'idle' ||
+        !/8001\/8000/.test(tsr.overLimitState.toastText) ||
+        !tsr.readyToClear ||
+        !tsr.clearedIdle
+      ) {
+        throw new Error(`Step 1 cancel / snapshot guard / 8000-cap / clear-reset failed: ${JSON.stringify(tsr)}`);
+      }
+      console.log('✓ Two-stage Repair -> Enhance, Alt+Click, in-button ↩ Revert, mid-flight Cancel, snapshot guard, 8000-char cap, and clear auto-reset verified');
+
       pageClient.close();
 
       // Scope: the same page under an unlisted hostname must get no injection.
@@ -2176,6 +2504,8 @@ async function runTests() {
       console.log('✓ No injection on an unlisted origin');
       otherClient.close();
     } finally {
+      for (const t of pendingMockTimers) clearTimeout(t);
+      pendingMockTimers.clear();
       server.close();
     }
 

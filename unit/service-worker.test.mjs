@@ -445,6 +445,57 @@ test('optimize port: start events carry model ID across ordered same-provider fa
   }
 });
 
+test('optimize port: repair runs without adding history and forwards 429 retry status', async () => {
+  stub.promptcraft_settings = {
+    schemaVersion: 5,
+    preferredEngine: 'omniroute',
+    omnirouteEnabled: true,
+    omnirouteBaseUrl: 'http://localhost:20128/v1'
+  };
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls++;
+    if (calls === 1) {
+      return new Response(JSON.stringify({ error: { message: 'Slow down' } }), {
+        status: 429,
+        headers: { 'Content-Type': 'application/json', 'Retry-After': '0.02' }
+      });
+    }
+    return new Response(JSON.stringify({ choices: [{ message: { content: 'write a test for login' } }] }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  };
+  try {
+    const port = fakePort();
+    await fire('connect', port);
+    await port.send({ type: 'start', payload: { action: 'repair', text: 'wrte a tst for lgoin' } });
+    await new Promise(r => setTimeout(r, 80));
+
+    const statusMsg = port.posted.find(m => m.type === 'status');
+    assert.ok(statusMsg, `expected retry status message, got ${JSON.stringify(port.posted)}`);
+    assert.equal(statusMsg.kind, 'retry');
+    assert.equal(statusMsg.status, 429);
+
+    const done = port.posted.find(m => m.type === 'done');
+    assert.ok(done, JSON.stringify(port.posted));
+    assert.equal(done.data.changed, true);
+    assert.equal(done.data.repaired, 'write a test for login');
+    assert.equal(stub.promptcraft_history, undefined, 'repair must not pollute prompt history');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('OPTIMIZE_PROMPT honors action: repair cleanly', async () => {
+  stub.promptcraft_settings = { schemaVersion: 5, preferredEngine: 'offline' };
+  const res = await send({ type: 'OPTIMIZE_PROMPT', payload: { action: 'repair', text: 'fix typo' } }, { tab: { id: 4 } });
+  assert.equal(res.success, true);
+  assert.equal(res.data.changed, false);
+  assert.equal(res.data.skipped, 'offline');
+});
+
 test('ports with other names are ignored', async () => {
   const port = fakePort('nano');
   await fire('connect', port);

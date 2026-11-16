@@ -123,8 +123,23 @@
       border-color: var(--accent);
       box-shadow: var(--shadow-accent);
     }
+    .pc-star-btn.is-busy .pc-spinner {
+      width: 15px;
+      height: 15px;
+    }
     .pc-star-btn.is-busy svg {
       animation: pc-star-pulse 1.1s var(--ease-standard) infinite;
+    }
+    .pc-star-btn.is-revert {
+      background: var(--success-soft);
+      border-color: var(--success);
+      color: var(--success-fg);
+    }
+    .pc-star-btn.is-revert:hover {
+      background: var(--success-soft);
+      border-color: var(--success);
+      color: var(--success-fg);
+      box-shadow: var(--shadow-2);
     }
     @keyframes pc-star-pulse {
       0%, 100% { transform: scale(1) rotate(0deg); opacity: 1; }
@@ -322,7 +337,8 @@
 
     @media (prefers-reduced-motion: reduce) {
       .pc-modal { animation: none; }
-      .pc-star-btn.is-busy svg { animation: none; }
+      .pc-star-btn.is-busy svg,
+      .pc-star-btn.is-busy .pc-spinner { animation: none; }
     }
   `;
 
@@ -408,8 +424,8 @@
       <span>Optimize</span>
     </button>
 
-    <button type="button" class="pc-star-btn" id="pc-star-btn"
-            aria-label="Auto-enhance prompt" title="Auto-enhance draft using your preconfigured setup">
+    <button type="button" class="pc-star-btn" id="pc-star-btn" data-state="idle"
+            aria-label="Auto-enhance prompt" title="Auto-enhance draft using your preconfigured setup (Alt+click to fix typos only)">
       <span data-icon="star" data-icon-size="15"></span>
     </button>
 
@@ -591,12 +607,30 @@
       .replace(/&/g, '&amp;').replace(/</g, '&lt;')
       .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
+    const QUICK_MAX_CHARS = 8000;
+    const QUICK_REPAIR_MAX_CHARS = 2000;
+    const hasStructuredPromptTokens = s =>
+      /(?:^|[\s(])@file:\S+/i.test(s) ||
+      /(?:^|[\s(])@[A-Za-z][A-Za-z0-9_.-]*(?:\/[^\s,;:!?)\]]+)*(?=$|[\s.,;:!?)\]])/.test(s) ||
+      /(?:^|[\s(])\/[A-Za-z][A-Za-z0-9_:-]{0,31}(?=$|[\s.,;:!?)\]])/.test(s);
+
     let activeFramework = 'smart-expand';
     let latest = '';
     let busy = false;
-    let quickBusy = false;
     let quickRun = null;
     let quickRunSeq = 0;
+    let isQuickWriting = false;
+    let quickRepairCached = true;
+    let quickEngineCached = null;
+    const quickState = {
+      mode: 'idle', // 'idle' | 'repairing' | 'enhancing' | 'repaired' | 'enhanced'
+      target: null,
+      originalBackup: null,
+      lastWritten: null,
+      hasAppliedStep1: false,
+      routeKey: location.href
+    };
+    const isQuickBusy = () => quickState.mode === 'repairing' || quickState.mode === 'enhancing';
     /* What the result on screen came from, so a saved prompt records it. */
     let lastOriginal = '';
     let lastEngine = '';
@@ -645,10 +679,10 @@
         targetBadge.textContent = '';
         targetBadge.title = '';
       }
-      if (!quickBusy) {
+      if (!isQuickBusy() && quickState.mode === 'idle') {
         const label = profile
-          ? `Auto-enhance draft for ${profile.name} using your preconfigured setup`
-          : 'Auto-enhance draft using your preconfigured setup';
+          ? `Auto-enhance draft for ${profile.name} using your preconfigured setup (Alt+click to fix typos only)`
+          : 'Auto-enhance draft using your preconfigured setup (Alt+click to fix typos only)';
         starBtn.title = label;
         starBtn.setAttribute('aria-label', label);
       }
@@ -986,7 +1020,7 @@
       loadingState.hidden = true;
     }
 
-    function startWaitTimer(label) {
+    function startWaitTimer(label, tone = 'neutral') {
       stopWaitTimer();
       let sec = 0;
       loadingLabel.textContent = label;
@@ -995,7 +1029,7 @@
         sec += 1;
         const text = `${label} (${sec}s)`;
         loadingLabel.textContent = text;
-        if (busy) setStatus(text, 'neutral');
+        if (busy) setStatus(text, tone);
       }, 1000);
     }
 
@@ -1004,7 +1038,9 @@
       const active = document.activeElement;
       returnFocusTo = (isFieldLike(active) ? active : null) || currentTargetElement || active;
 
-      cancelQuickRun();
+      if (isQuickBusy()) {
+        cancelQuickRun({ preserveRevert: Boolean(quickState.hasAppliedStep1) });
+      }
       isModalOpen = true;
       backdrop.classList.add('is-open');
       hideFloatingControls();
@@ -1127,7 +1163,7 @@
     starBtn.addEventListener('mousedown', e => e.preventDefault());
     starBtn.addEventListener('click', e => {
       e.stopPropagation();
-      autoEnhanceChatInput();
+      autoEnhanceChatInput({ altKey: Boolean(e.altKey) });
     });
 
     /* Requests from the service worker: the keyboard command and the context menu. */
@@ -1514,6 +1550,14 @@
             onToken: delta => {
               streamed += delta;
               paint(streamed);
+            },
+            onStatus: info => {
+              if (!busy) return;
+              const waitSec = info?.delayMs ? `${Math.max(1, Math.round(info.delayMs / 1000))}s` : '';
+              const why = info?.status === 429 ? 'Rate limited (429)' : (info?.reason || 'Retrying');
+              const msg = `${why}${waitSec ? `, retrying in ${waitSec}…` : ', retrying…'}`;
+              setStatus(msg, 'warning');
+              if (!streamed) startWaitTimer(msg, 'warning');
             }
           });
           data = await currentRun.promise;
@@ -1599,33 +1643,129 @@
       }
     });
 
-    function setQuickBusy(next, statusHint = '') {
-      quickBusy = next;
-      starBtn.classList.toggle('is-busy', next);
-      starBtn.setAttribute('aria-busy', String(next));
-      if (next) {
-        const msg = statusHint || 'Enhancing draft';
+    function setStarVisual(mode, statusHint = '') {
+      quickState.mode = mode;
+      const busyNow = mode === 'repairing' || mode === 'enhancing';
+      const revertNow = mode === 'repaired' || mode === 'enhanced';
+      starBtn.dataset.state = mode;
+      starBtn.classList.toggle('is-busy', busyNow);
+      starBtn.classList.toggle('is-revert', revertNow);
+      starBtn.setAttribute('aria-busy', String(busyNow));
+
+      if (busyNow) {
+        starBtn.innerHTML = '<span class="pc-spinner" aria-hidden="true"></span>';
+        const msg = statusHint || (mode === 'repairing' ? 'Checking typos…' : 'Enhancing draft…');
         starBtn.title = `${msg} (click to cancel)`;
         starBtn.setAttribute('aria-label', `${msg} (click to cancel)`);
+      } else if (revertNow) {
+        starBtn.innerHTML = ICON('undo', 15) || '<span aria-hidden="true">↩</span>';
+        const msg = statusHint || (mode === 'repaired'
+          ? 'Typos repaired — click to revert'
+          : 'Prompt enhanced — click to revert to original');
+        starBtn.title = msg;
+        starBtn.setAttribute('aria-label', msg);
       } else {
+        starBtn.innerHTML = ICON('star', 15) || '<span aria-hidden="true">★</span>';
         refreshPlatformIdentity();
       }
     }
 
-    function cancelQuickRun() {
+    function resetQuickState() {
+      quickState.target = null;
+      quickState.originalBackup = null;
+      quickState.lastWritten = null;
+      quickState.hasAppliedStep1 = false;
+      quickState.routeKey = location.href;
+      setStarVisual('idle');
+    }
+
+    function writeQuickText(el, text) {
+      if (!el?.isConnected || !isEligibleField(el)) return false;
+      isQuickWriting = true;
+      try {
+        return insertTextIntoElement(el, text);
+      } finally {
+        isQuickWriting = false;
+      }
+    }
+
+    function revertQuickDraft() {
+      if (quickState.originalBackup == null) return false;
+      const undoTarget = (quickState.target?.isConnected && isEligibleField(quickState.target) && quickState.target)
+        || (currentTargetElement?.isConnected && isEligibleField(currentTargetElement) && currentTargetElement)
+        || findChatInput();
+      const backup = quickState.originalBackup;
+      if (undoTarget && writeQuickText(undoTarget, backup)) {
+        currentTargetElement = undoTarget;
+        positionTrigger(undoTarget);
+        resetQuickState();
+        toast('Restored original draft', 'neutral');
+        return true;
+      }
+      toast('Could not restore original draft', 'danger');
+      return false;
+    }
+
+    function cancelQuickRun({ preserveRevert = false } = {}) {
       quickRunSeq += 1;
       const activeRun = quickRun;
       quickRun = null;
       activeRun?.cancel?.();
-      if (quickBusy) setQuickBusy(false);
+      if (preserveRevert && quickState.hasAppliedStep1 && quickState.target?.isConnected && getElementValue(quickState.target).trim()) {
+        setStarVisual('repaired', 'Typos repaired — click to revert');
+      } else if (isQuickBusy()) {
+        resetQuickState();
+      }
     }
 
-    async function autoEnhanceChatInput() {
-      if (quickBusy) {
-        cancelQuickRun();
-        toast('Quick enhance cancelled', 'neutral');
+    async function runQuickWorker(payload, handlers) {
+      if (ds?.runClient) {
+        quickRun = ds.runClient.startRun(payload, handlers);
+        return await quickRun.promise;
+      }
+      return await sendOnce(payload);
+    }
+
+    function composerChangedByUser(el, expectedNorm) {
+      if (!el?.isConnected || !isEligibleField(el)) return true;
+      return normalizeInsertedText(getElementValue(el)) !== expectedNorm;
+    }
+
+    function formatQuickRetry(info) {
+      const waitSec = info?.delayMs ? `${Math.max(1, Math.round(info.delayMs / 1000))}s` : '';
+      const why = info?.status === 429 ? 'Rate limited (429)' : (info?.reason || 'Retrying');
+      return `${why}${waitSec ? `, retrying in ${waitSec}…` : ', retrying…'}`;
+    }
+
+    async function autoEnhanceChatInput({ altKey = false } = {}) {
+      if (location.href !== quickState.routeKey) {
+        cancelQuickRun({ preserveRevert: false });
+        resetQuickState();
+      }
+
+      if (isQuickBusy()) {
+        const keepRevert = Boolean(
+          quickState.hasAppliedStep1 &&
+          quickState.target?.isConnected &&
+          getElementValue(quickState.target).trim()
+        );
+        cancelQuickRun({ preserveRevert: keepRevert });
+        toast(keepRevert ? 'Enhancement cancelled — typo fixes kept' : 'Quick enhance cancelled', 'neutral');
         return;
       }
+
+      if (quickState.mode === 'repaired' || quickState.mode === 'enhanced') {
+        const activeTarget = quickState.target?.isConnected ? quickState.target : null;
+        const switchedField = currentTargetElement && activeTarget && currentTargetElement !== activeTarget;
+        const liveVal = activeTarget ? getElementValue(activeTarget) : '';
+        if (!liveVal.trim() || switchedField) {
+          resetQuickState();
+        } else {
+          revertQuickDraft();
+          return;
+        }
+      }
+
       if (busy) return;
 
       const active = document.activeElement;
@@ -1650,17 +1790,37 @@
         return;
       }
 
+      if (trimmed.length > QUICK_MAX_CHARS) {
+        toast(`Draft too long for quick enhance (${trimmed.length}/${QUICK_MAX_CHARS} chars) — use Optimize modal`, 'danger');
+        return;
+      }
+
       const profile = resolveSiteProfile();
       const targetHint = profile ? ` for ${profile.name}` : '';
       const seq = ++quickRunSeq;
-      setQuickBusy(true, `Enhancing draft${targetHint}…`);
+      const snapshot0 = normalizeInsertedText(raw);
 
-      let data = null;
+      quickState.target = target;
+      quickState.originalBackup = raw;
+      quickState.lastWritten = null;
+      quickState.hasAppliedStep1 = false;
+      quickState.routeKey = location.href;
+      const likelyRepair = altKey || (
+        quickRepairCached &&
+        (quickEngineCached || DEFAULT_ENGINE) !== 'offline' &&
+        trimmed.length <= QUICK_REPAIR_MAX_CHARS &&
+        !hasStructuredPromptTokens(trimmed)
+      );
+      setStarVisual(likelyRepair ? 'repairing' : 'enhancing', likelyRepair ? 'Checking typos…' : `Enhancing draft${targetHint}…`);
+
       try {
         const [settings, frameworks] = await Promise.all([getSettings(), getFrameworksList()]);
         if (seq !== quickRunSeq) return;
+        if (location.href !== quickState.routeKey) { resetQuickState(); return; }
 
         const preEngine = settings.preferredEngine || DEFAULT_ENGINE;
+        quickEngineCached = preEngine;
+        quickRepairCached = settings.quickRepairEnabled !== false;
         const preFramework = settings.preferredFramework && frameworks.some(f => f.id === settings.preferredFramework)
           ? settings.preferredFramework
           : (frameworks[0]?.id || 'smart-expand');
@@ -1668,7 +1828,7 @@
         if (ds?.secrets) {
           const warning = ds.secrets.secretWarning(trimmed, preEngine, settings);
           if (warning && secretAllowedFor !== trimmed) {
-            setQuickBusy(false);
+            resetQuickState();
             toast('Review secret warning before sending', 'danger');
             await openModal(trimmed);
             secretNotice?.show(warning);
@@ -1676,71 +1836,216 @@
           }
         }
 
+        let draftForEnhance = trimmed;
+        let currentExpectedNorm = snapshot0;
+
+        if (altKey) {
+          if (trimmed.length > QUICK_REPAIR_MAX_CHARS) {
+            resetQuickState();
+            toast(`Draft exceeds ${QUICK_REPAIR_MAX_CHARS} chars for typo repair`, 'neutral');
+            return;
+          }
+          if (preEngine === 'offline') {
+            resetQuickState();
+            toast('Typo repair needs an AI engine in Options', 'neutral');
+            return;
+          }
+          setStarVisual('repairing', 'Checking typos…');
+          const rep = await runQuickWorker(
+            { action: 'repair', text: trimmed, engine: preEngine, host: location.hostname },
+            {
+              onStart: (usedEngine, usedModel) => {
+                if (seq !== quickRunSeq) return;
+                const name = ENGINE_LABELS[usedEngine] || usedEngine;
+                const via = usedModel ? `${name} (${usedModel})` : name;
+                setStarVisual('repairing', `Checking typos via ${via}…`);
+              },
+              onStatus: info => {
+                if (seq === quickRunSeq) setStarVisual('repairing', formatQuickRetry(info));
+              }
+            }
+          );
+          if (seq !== quickRunSeq) return;
+          if (!rep || location.href !== quickState.routeKey) {
+            resetQuickState();
+            return;
+          }
+          if (rep.changed && rep.repaired) {
+            const liveTarget = (target.isConnected && isEligibleField(target) && target) || findChatInput();
+            if (!liveTarget || composerChangedByUser(liveTarget, snapshot0)) {
+              resetQuickState();
+              toast('Draft changed while checking typos — skipped update', 'neutral');
+              return;
+            }
+            if (writeQuickText(liveTarget, rep.repaired)) {
+              quickState.target = liveTarget;
+              quickState.lastWritten = normalizeInsertedText(getElementValue(liveTarget));
+              quickState.hasAppliedStep1 = true;
+              currentTargetElement = liveTarget;
+              positionTrigger(liveTarget);
+              setStarVisual('repaired', 'Typos repaired — click to revert');
+              toast('Typos repaired', 'success', {
+                actionLabel: 'Undo',
+                duration: 6000,
+                onAction: revertQuickDraft
+              });
+            } else {
+              resetQuickState();
+              try { await navigator.clipboard.writeText(rep.repaired); } catch {}
+              toast('Could not update chat box — copied instead', 'danger');
+            }
+          } else {
+            resetQuickState();
+            const reasonMsg = rep.skipped === 'structured_tokens'
+              ? 'Skipped typo repair for @mention or /command prompt'
+              : rep.skipped === 'error'
+                ? 'Could not run typo repair right now'
+                : 'No typos needed fixing';
+            toast(reasonMsg, 'neutral');
+          }
+          return;
+        }
+
+        const shouldRepair = settings.quickRepairEnabled !== false &&
+          preEngine !== 'offline' &&
+          trimmed.length <= QUICK_REPAIR_MAX_CHARS &&
+          !hasStructuredPromptTokens(trimmed);
+
+        if (shouldRepair) {
+          setStarVisual('repairing', 'Checking typos…');
+          try {
+            const rep = await runQuickWorker(
+              { action: 'repair', text: trimmed, engine: preEngine, host: location.hostname },
+              {
+                onStart: (usedEngine, usedModel) => {
+                  if (seq !== quickRunSeq) return;
+                  const name = ENGINE_LABELS[usedEngine] || usedEngine;
+                  const via = usedModel ? `${name} (${usedModel})` : name;
+                  setStarVisual('repairing', `Checking typos via ${via}…`);
+                },
+                onStatus: info => {
+                  if (seq === quickRunSeq) setStarVisual('repairing', formatQuickRetry(info));
+                }
+              }
+            );
+            if (seq !== quickRunSeq) return;
+            if (!rep || location.href !== quickState.routeKey) {
+              resetQuickState();
+              return;
+            }
+            if (rep.changed && rep.repaired) {
+              const step1Target = (target.isConnected && isEligibleField(target) && target) || findChatInput();
+              if (!step1Target || composerChangedByUser(step1Target, snapshot0)) {
+                resetQuickState();
+                toast('Draft changed while checking typos — cancelled', 'neutral');
+                return;
+              }
+              if (writeQuickText(step1Target, rep.repaired)) {
+                quickState.target = step1Target;
+                currentExpectedNorm = normalizeInsertedText(getElementValue(step1Target));
+                quickState.lastWritten = currentExpectedNorm;
+                quickState.hasAppliedStep1 = true;
+                draftForEnhance = rep.repaired;
+                currentTargetElement = step1Target;
+                positionTrigger(step1Target);
+              }
+            }
+          } catch {
+            // Silent non-blocking fallback so Step 2 still runs unless cancelled or navigated away
+            if (seq !== quickRunSeq) return;
+            if (location.href !== quickState.routeKey) { resetQuickState(); return; }
+          } finally {
+            if (seq === quickRunSeq) quickRun = null;
+          }
+        }
+
+        setStarVisual('enhancing', `Enhancing draft${targetHint}…`);
         const payload = {
           action: 'optimize',
-          text: trimmed,
+          text: draftForEnhance,
           engine: preEngine,
           frameworkId: preFramework,
           variantCount: 1,
-          context: pageContext(trimmed, Boolean(settings.includePageContext)),
+          context: pageContext(draftForEnhance, Boolean(settings.includePageContext)),
           host: location.hostname
         };
 
-        if (ds?.runClient) {
-          quickRun = ds.runClient.startRun(payload, {
-            onStart: (usedEngine, usedModel) => {
-              if (seq !== quickRunSeq) return;
-              const name = ENGINE_LABELS[usedEngine] || usedEngine;
-              const via = usedModel ? `${name} (${usedModel})` : name;
-              setQuickBusy(true, `Enhancing${targetHint} via ${via}…`);
-            }
+        const data = await runQuickWorker(payload, {
+          onStart: (usedEngine, usedModel) => {
+            if (seq !== quickRunSeq) return;
+            const name = ENGINE_LABELS[usedEngine] || usedEngine;
+            const via = usedModel ? `${name} (${usedModel})` : name;
+            setStarVisual('enhancing', `Enhancing${targetHint} via ${via}…`);
+          },
+          onStatus: info => {
+            if (seq === quickRunSeq) setStarVisual('enhancing', formatQuickRetry(info));
+          }
+        });
+
+        if (seq !== quickRunSeq) return;
+        if (location.href !== quickState.routeKey) {
+          resetQuickState();
+          return;
+        }
+        if (!data?.optimized) {
+          if (quickState.hasAppliedStep1 && quickState.target?.isConnected && getElementValue(quickState.target).trim()) {
+            setStarVisual('repaired', 'Typos repaired — click to revert');
+          } else {
+            resetQuickState();
+          }
+          return;
+        }
+
+        const writeTarget = (quickState.target?.isConnected && isEligibleField(quickState.target) && quickState.target)
+          || (target.isConnected && isEligibleField(target) && target)
+          || findChatInput();
+
+        if (!writeTarget || composerChangedByUser(writeTarget, currentExpectedNorm)) {
+          resetQuickState();
+          toast('Draft changed while enhancing — kept your edit', 'neutral');
+          return;
+        }
+
+        if (writeQuickText(writeTarget, data.optimized)) {
+          quickState.target = writeTarget;
+          quickState.lastWritten = normalizeInsertedText(getElementValue(writeTarget));
+          currentTargetElement = writeTarget;
+          positionTrigger(writeTarget);
+          setStarVisual('enhanced', 'Prompt enhanced — click to revert to original');
+
+          const engineLabel = ENGINE_LABELS[data.engine] || data.engine || '';
+          const msg = data.degraded
+            ? (profile ? `Enhanced for ${profile.name} (offline fallback)` : 'Enhanced with offline fallback')
+            : (profile
+              ? `Enhanced for ${profile.name}${engineLabel ? ` · ${engineLabel}` : ''}`
+              : `Prompt enhanced${engineLabel ? ` · ${engineLabel}` : ''}`);
+          toast(msg, data.degraded ? 'neutral' : 'success', {
+            actionLabel: 'Undo',
+            duration: 6000,
+            onAction: revertQuickDraft
           });
-          data = await quickRun.promise;
         } else {
-          data = await sendOnce(payload);
+          if (quickState.hasAppliedStep1 && quickState.target?.isConnected && getElementValue(quickState.target).trim()) {
+            setStarVisual('repaired', 'Typos repaired — click to revert');
+          } else {
+            resetQuickState();
+          }
+          try { await navigator.clipboard.writeText(data.optimized); } catch {}
+          toast('Could not update chat box — copied instead', 'danger');
         }
       } catch (err) {
         if (seq === quickRunSeq) {
+          if (quickState.hasAppliedStep1 && quickState.target?.isConnected && getElementValue(quickState.target).trim()) {
+            setStarVisual('repaired', 'Typos repaired — click to revert');
+          } else {
+            resetQuickState();
+          }
           toast(err?.message || 'Quick enhance failed', 'danger');
         }
-        return;
       } finally {
         if (seq === quickRunSeq) {
           quickRun = null;
-          setQuickBusy(false);
         }
-      }
-
-      if (seq !== quickRunSeq || !data?.optimized) return;
-
-      const writeTarget = (target.isConnected && isEligibleField(target) && target) || findChatInput();
-      const beforeInsert = writeTarget ? (getElementValue(writeTarget) || raw) : raw;
-      if (writeTarget && insertTextIntoElement(writeTarget, data.optimized)) {
-        currentTargetElement = writeTarget;
-        positionTrigger(writeTarget);
-        const engineLabel = ENGINE_LABELS[data.engine] || data.engine || '';
-        const msg = data.degraded
-          ? (profile ? `Enhanced for ${profile.name} (offline fallback)` : 'Enhanced with offline fallback')
-          : (profile
-            ? `Enhanced for ${profile.name}${engineLabel ? ` · ${engineLabel}` : ''}`
-            : `Prompt enhanced${engineLabel ? ` · ${engineLabel}` : ''}`);
-        toast(msg, data.degraded ? 'neutral' : 'success', {
-          actionLabel: 'Undo',
-          duration: 6000,
-          onAction: () => {
-            const undoTarget = (writeTarget?.isConnected && isEligibleField(writeTarget) && writeTarget) || findChatInput();
-            if (undoTarget && insertTextIntoElement(undoTarget, beforeInsert)) {
-              currentTargetElement = undoTarget;
-              positionTrigger(undoTarget);
-              toast('Restored original draft', 'neutral');
-            } else {
-              toast('Could not restore original draft', 'danger');
-            }
-          }
-        });
-      } else {
-        try { await navigator.clipboard.writeText(data.optimized); } catch {}
-        toast('Could not update chat box — copied instead', 'danger');
       }
     }
 
@@ -2259,6 +2564,27 @@
       }
     }
 
+    function syncQuickResetWatchers() {
+      if (location.href !== quickState.routeKey) {
+        cancelQuickRun({ preserveRevert: false });
+        if (quickState.mode !== 'idle') resetQuickState();
+        else quickState.routeKey = location.href;
+        return;
+      }
+      if (!isQuickBusy() && quickState.mode !== 'idle') {
+        if (!quickState.target?.isConnected || !getElementValue(quickState.target).trim()) {
+          resetQuickState();
+        }
+      }
+    }
+
+    function scheduleQuickSubmitResetCheck() {
+      if (isQuickBusy() || quickState.mode === 'idle') return;
+      const check = () => syncQuickResetWatchers();
+      setTimeout(check, 80);
+      setTimeout(check, 260);
+    }
+
     /* Pages mutate constantly. Re-scan at most every 400 ms, and only when the
        field we were tracking is gone or no longer visible. */
     let scanTimer = 0;
@@ -2267,6 +2593,7 @@
       scanTimer = setTimeout(() => {
         scanTimer = 0;
         ensureHost();
+        syncQuickResetWatchers();
         if (!currentTargetElement?.isConnected || !isEligibleField(currentTargetElement) || !isVisibleElement(currentTargetElement)) {
           autoDetectAndPosition();
         }
@@ -2277,9 +2604,29 @@
       new MutationObserver(scheduleScan).observe(document.body, { childList: true, subtree: true });
     } catch {}
 
+    document.addEventListener('input', e => {
+      if (isQuickWriting || isQuickBusy() || quickState.mode === 'idle') return;
+      const t = quickState.target;
+      if (t && (e.target === t || (e.target instanceof Element && t.contains(e.target)))) {
+        if (!getElementValue(t).trim()) resetQuickState();
+      }
+    }, true);
+
+    document.addEventListener('keydown', e => {
+      if (e.isComposing || e.key !== 'Enter' || e.shiftKey || e.altKey || e.ctrlKey || e.metaKey) return;
+      if (!isQuickBusy() && quickState.mode !== 'idle') {
+        const t = quickState.target;
+        if (t && (e.target === t || document.activeElement === t || (e.target instanceof Element && t.contains(e.target)))) {
+          scheduleQuickSubmitResetCheck();
+        }
+      }
+    }, true);
+
     document.addEventListener('focusin', e => {
+      syncQuickResetWatchers();
       const el = fieldFrom(e.target);
       if (el) {
+        if (!isQuickBusy() && quickState.target && el !== quickState.target) resetQuickState();
         currentTargetElement = el;
         positionTrigger(el);
       } else if (isFieldLike(e.target)) {
@@ -2290,8 +2637,14 @@
     }, true);
 
     document.addEventListener('click', e => {
+      if (e.target instanceof Element && !host.contains(e.target) && !isQuickBusy() && quickState.mode !== 'idle') {
+        if (e.target.closest('button, [role="button"], [type="submit"]')) {
+          scheduleQuickSubmitResetCheck();
+        }
+      }
       const el = fieldFrom(e.target);
       if (el) {
+        if (!isQuickBusy() && quickState.target && el !== quickState.target) resetQuickState();
         currentTargetElement = el;
         positionTrigger(el);
       }
@@ -2305,6 +2658,8 @@
 
     window.addEventListener('scroll', reposition, { capture: true, passive: true });
     window.addEventListener('resize', reposition, { passive: true });
+    window.addEventListener('popstate', syncQuickResetWatchers);
+    window.addEventListener('hashchange', syncQuickResetWatchers);
 
     chrome.storage.onChanged.addListener((changes, area) => {
       if (area !== 'local') return;
@@ -2312,7 +2667,13 @@
 
       const next = changes.promptcraft_settings?.newValue;
       if (next?.theme) setTheme(next.theme);
-      if (next?.preferredEngine) setEngine(next.preferredEngine);
+      if (next?.preferredEngine) {
+        setEngine(next.preferredEngine);
+        quickEngineCached = next.preferredEngine;
+      }
+      if (next && 'quickRepairEnabled' in next) {
+        quickRepairCached = next.quickRepairEnabled !== false;
+      }
       if (next?.variantCount != null) setVariantCount(next.variantCount);
       if (typeof next?.includePageContext === 'boolean') contextToggle.checked = next.includePageContext;
       if (next && (next.enableFloatingWidget !== false) !== widgetEnabled) {
@@ -2320,7 +2681,8 @@
         if (widgetEnabled) {
           autoDetectAndPosition();
         } else {
-          cancelQuickRun();
+          cancelQuickRun({ preserveRevert: false });
+          resetQuickState();
           hideFloatingControls();
         }
       }
@@ -2334,8 +2696,10 @@
       } catch {}
       const settings = stored.promptcraft_settings || {};
       widgetEnabled = settings.enableFloatingWidget !== false;
+      quickRepairCached = settings.quickRepairEnabled !== false;
+      quickEngineCached = settings.preferredEngine || DEFAULT_ENGINE;
       setTheme(settings.theme || 'dark');
-      setEngine(settings.preferredEngine || DEFAULT_ENGINE);
+      setEngine(quickEngineCached);
       setVariantCount(settings.variantCount);
       contextToggle.checked = Boolean(settings.includePageContext);
       if (settings.preferredFramework) activeFramework = settings.preferredFramework;

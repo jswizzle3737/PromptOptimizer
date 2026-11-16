@@ -128,6 +128,7 @@ export const DEFAULT_SETTINGS = {
   preferredEngine: 'nano',
   preferredFramework: 'smart-expand',
   enableFloatingWidget: true,
+  quickRepairEnabled: true,
   allowCloudFallback: true,
   fallback1Engine: '',
   fallback1Model: '',
@@ -222,6 +223,8 @@ export async function migrateSettings(stored, retiredKeyHashes = RETIRED_OPENROU
     const rawModel = typeof merged[mKey] === 'string' ? merged[mKey].trim() : '';
     merged[mKey] = !validEngine || validEngine === 'nano' || validEngine === 'offline' ? '' : rawModel;
   }
+
+  merged.quickRepairEnabled = merged.quickRepairEnabled !== false;
 
   merged.schemaVersion = SCHEMA_VERSION;
   return merged;

@@ -6,8 +6,9 @@
  * with the result, or with null when cancelled; it rejects with the worker's
  * error. `onStart(engine, model)` fires when an engine begins, again for each
  * fallback engine or model: the caller discards any text streamed so far.
+ * `onStatus(info)` reports transient retry states (e.g. 429 rate-limit backoff).
  */
-export function startRun(payload, { onStart, onToken } = {}) {
+export function startRun(payload, { onStart, onToken, onStatus } = {}) {
   const port = chrome.runtime.connect({ name: 'optimize' });
   let settled = false;
   let resolveRun;
@@ -24,6 +25,7 @@ export function startRun(payload, { onStart, onToken } = {}) {
   port.onMessage.addListener(msg => {
     if (msg?.type === 'start') onStart?.(msg.engine, msg.model);
     else if (msg?.type === 'token') onToken?.(msg.delta);
+    else if (msg?.type === 'status') onStatus?.(msg);
     else if (msg?.type === 'done') finish(resolveRun, msg.data);
     else if (msg?.type === 'cancelled') finish(resolveRun, null);
     else if (msg?.type === 'error') finish(rejectRun, new Error(msg.error));

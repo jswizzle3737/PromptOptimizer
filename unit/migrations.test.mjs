@@ -28,6 +28,7 @@ test('defaults ship with no credential and Chrome Nano selected', () => {
   assert.equal(DEFAULT_SETTINGS.fallback1Model, '');
   assert.equal(DEFAULT_SETTINGS.fallback2Engine, '');
   assert.equal(DEFAULT_SETTINGS.fallback2Model, '');
+  assert.equal(DEFAULT_SETTINGS.quickRepairEnabled, true);
   assert.equal(DEFAULT_SETTINGS.preferredEngine, 'nano');
   assert.equal(SCHEMA_VERSION, 5);
 });
@@ -38,11 +39,17 @@ test('a fresh install resolves to the new defaults', async () => {
   assert.equal(s.preferredEngine, 'nano');
   assert.equal(s.allowCloudFallback, true);
   assert.equal(s.omnirouteEnabled, false);
+  assert.equal(s.quickRepairEnabled, true);
   assert.equal(s.fallback1Engine, '');
   assert.equal(s.fallback1Model, '');
   assert.equal(s.fallback2Engine, '');
   assert.equal(s.fallback2Model, '');
   assert.equal(s.schemaVersion, 5);
+
+  const disabled = await migrateSettings({ schemaVersion: 5, quickRepairEnabled: false }, RETIRED_HASHES);
+  assert.equal(disabled.quickRepairEnabled, false);
+  const restored = await migrateSettings({ schemaVersion: 5, quickRepairEnabled: undefined }, RETIRED_HASHES);
+  assert.equal(restored.quickRepairEnabled, true);
 });
 
 test('the retired embedded key is blanked and the engine moves off OpenRouter', async () => {

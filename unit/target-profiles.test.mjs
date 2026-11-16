@@ -73,11 +73,13 @@ test('getChatInputSelectors prioritizes recognized platform selectors before gen
   );
 });
 
-test('star icon is registered for quick chat enhancement', () => {
-  assert.equal(hasIcon('star'), true);
-  const svg = icon('star', { size: 15 });
-  assert.match(svg, /<svg[^>]*>/);
-  assert.match(svg, /<path\b/);
+test('star and undo icons are registered for quick chat enhancement', () => {
+  for (const name of ['star', 'undo']) {
+    assert.equal(hasIcon(name), true);
+    const svg = icon(name, { size: 15 });
+    assert.match(svg, /<svg[^>]*>/);
+    assert.match(svg, /<path\b/);
+  }
 });
 
 /* ------------------------------------------------------------- chips */
@@ -123,12 +125,14 @@ test('every chip has both a label and a hoverable detail', () => {
 
 /* --------------------------------------------------- prompt construction */
 
-test('buildSystemPrompt keeps the raw-prompt rule and adds the technique block', () => {
+test('buildSystemPrompt keeps the raw-prompt rule, preservation rule, and technique block', () => {
   const out = buildSystemPrompt('You rewrite prompts.');
   assert.match(out, /You rewrite prompts\./);
   assert.match(out, /<raw_prompt>/);
   assert.match(out, /quality techniques/i);
   assert.match(out, /citing sources/i);
+  assert.match(out, /@file.*@mention.*\/command/i);
+  assert.match(out, /Match the language/i);
 });
 
 test('buildSystemPrompt injects target guidance only when a profile is given', () => {

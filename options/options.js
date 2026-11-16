@@ -93,6 +93,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     fwTemplate: $('fw-template'),
     maxHistory: $('max-history'),
     widgetToggle: $('enable-floating-widget'),
+    quickRepairToggle: $('quick-repair-enabled'),
     customPrompt: $('custom-system-prompt'),
     exportLibraryBtn: $('export-library-btn'),
     importLibraryBtn: $('import-library-btn'),
@@ -143,6 +144,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       omnirouteModel: el.omniModelInput.value.trim(),
       customSystemPrompt: el.customPrompt.value.trim(),
       enableFloatingWidget: el.widgetToggle.checked,
+      quickRepairEnabled: el.quickRepairToggle.checked,
       maxHistoryItems: el.maxHistory.value.trim()
     };
   }
@@ -720,6 +722,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   el.customPrompt.value = settings.customSystemPrompt || '';
   el.widgetToggle.checked = settings.enableFloatingWidget !== false;
+  el.quickRepairToggle.checked = settings.quickRepairEnabled !== false;
   el.maxHistory.value = String(clampMaxHistory(settings.maxHistoryItems, 20));
 
   geminiPreset.syncFromInput();
@@ -757,7 +760,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     el.customPrompt, el.maxHistory
   ];
   watchedTextInputs.forEach(input => input.addEventListener('input', syncDirtyState));
-  [el.allowCloudFallback, el.omniEnabled, el.widgetToggle].forEach(cb => {
+  [el.allowCloudFallback, el.omniEnabled, el.widgetToggle, el.quickRepairToggle].forEach(cb => {
     cb.addEventListener('change', () => {
       updateFallbackHints();
       syncDirtyState();
@@ -1613,6 +1616,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         omnirouteModel: el.omniModelInput.value.trim() || PROVIDER_DEFAULTS.omniroute.model,
         customSystemPrompt: el.customPrompt.value.trim(),
         enableFloatingWidget: el.widgetToggle.checked,
+        quickRepairEnabled: el.quickRepairToggle.checked,
         maxHistoryItems: clampedHistory
       });
 

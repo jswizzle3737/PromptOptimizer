@@ -7,7 +7,7 @@
  */
 
 import {
-  optimizePrompt, refinePrompt, clarifyPrompt, setNanoBackend, setNanoJudgeBackend, CancelledError
+  optimizePrompt, refinePrompt, clarifyPrompt, repairPrompt, setNanoBackend, setNanoJudgeBackend, CancelledError
 } from '../shared/optimizer-engine.js';
 import { nanoBridge } from './nano-bridge.js';
 import { isEngine } from '../shared/engines.js';
@@ -226,8 +226,8 @@ async function disableSite(rawOrigin) {
 
 /**
  * Run one request from the popup or a page.
- * payload.action: 'optimize' (default) | 'refine' | 'clarify'.
- * `io` carries { signal, onToken, onStart } when the caller streams.
+ * payload.action: 'optimize' (default) | 'refine' | 'clarify' | 'repair'.
+ * `io` carries { signal, onToken, onStart, onStatus } when the caller streams.
  */
 async function runRequest(payload = {}, sender, io = {}) {
   const { action = 'optimize', text, frameworkId, engine, host, context, variantCount, kind, previous, instruction } = payload;
@@ -239,7 +239,12 @@ async function runRequest(payload = {}, sender, io = {}) {
   })();
   const common = { frameworkId, engine, host: senderHost || host, ...io };
 
-  if (action === 'clarify') return clarifyPrompt(text, { engine, signal: io.signal });
+  if (action === 'clarify') {
+    return clarifyPrompt(text, { engine, signal: io.signal, onStart: io.onStart, onStatus: io.onStatus });
+  }
+  if (action === 'repair') {
+    return repairPrompt(text, { engine, signal: io.signal, onStart: io.onStart, onStatus: io.onStatus });
+  }
 
   const result = action === 'refine'
     ? await refinePrompt(text, { ...common, kind, previous, instruction })
@@ -260,6 +265,7 @@ async function runRequest(payload = {}, sender, io = {}) {
  * { type: 'start', payload }; the worker answers with
  *   { type: 'start', engine, model? }   an engine began (discard any streamed text)
  *   { type: 'token', delta }            streamed text
+ *   { type: 'status', kind, ... }       transient status (e.g. 429 retry wait)
  *   { type: 'done', data } | { type: 'error', error } | { type: 'cancelled' }
  * Posting { type: 'cancel' } or disconnecting aborts the request.
  */
@@ -276,7 +282,8 @@ chrome.runtime.onConnect.addListener(port => {
       const data = await runRequest(msg.payload, port.sender, {
         signal: ctl.signal,
         onToken: delta => post({ type: 'token', delta }),
-        onStart: (engine, model) => post({ type: 'start', engine, ...(model && { model }) })
+        onStart: (engine, model) => post({ type: 'start', engine, ...(model && { model }) }),
+        onStatus: info => post({ ...(info || {}), kind: info?.type || 'status', type: 'status' })
       });
       post({ type: 'done', data });
     } catch (err) {
@@ -293,6 +300,7 @@ chrome.runtime.onConnect.addListener(port => {
 
 /** Messages only extension pages may send. A content script has `sender.tab`. */
 const PAGE_ONLY = new Set(['ENABLE_SITE', 'DISABLE_SITE']);
+const PORT_ACTIONS = new Set(['optimize', 'refine', 'clarify', 'repair']);
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   (async () => {
@@ -304,7 +312,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       switch (message.type) {
         case 'OPTIMIZE_PROMPT': {
           // One-shot form of the 'optimize' port below, without streaming.
-          const data = await runRequest({ ...message.payload, action: 'optimize' }, sender);
+          const action = PORT_ACTIONS.has(message.payload?.action) ? message.payload.action : 'optimize';
+          const data = await runRequest({ ...message.payload, action }, sender);
           sendResponse({ success: true, data });
           break;
         }

@@ -474,7 +474,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     el.loadingState.hidden = true;
   }
 
-  function startWaitTimer(label) {
+  function startWaitTimer(label, tone = 'neutral') {
     stopWaitTimer();
     let sec = 0;
     el.loadingLabel.textContent = label;
@@ -483,7 +483,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       sec += 1;
       const text = `${label} (${sec}s)`;
       el.loadingLabel.textContent = text;
-      if (state.busy) setStatus(text, 'neutral');
+      if (state.busy) setStatus(text, tone);
     }, 1000);
   }
 
@@ -874,6 +874,14 @@ document.addEventListener('DOMContentLoaded', async () => {
       onToken: delta => {
         streamed += delta;
         paint(streamed);
+      },
+      onStatus: info => {
+        if (!state.busy) return;
+        const waitSec = info?.delayMs ? `${Math.max(1, Math.round(info.delayMs / 1000))}s` : '';
+        const why = info?.status === 429 ? 'Rate limited (429)' : (info?.reason || 'Retrying');
+        const msg = `${why}${waitSec ? `, retrying in ${waitSec}…` : ', retrying…'}`;
+        setStatus(msg, 'warning');
+        if (!streamed) startWaitTimer(msg, 'warning');
       }
     });
 

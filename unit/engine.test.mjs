@@ -2,8 +2,10 @@ import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { installChromeStub, stubFetch, jsonResponse } from './helpers.mjs';
 import {
-  optimizePrompt, refinePrompt, clarifyPrompt, buildUserMessage, buildProviderRequest, cleanModelOutput,
-  verifyProvider, checkBuiltInPromptApiStatus, escapeRawPromptTags, sendProviderRequest
+  optimizePrompt, refinePrompt, clarifyPrompt, repairPrompt,
+  buildUserMessage, buildProviderRequest, cleanModelOutput,
+  verifyProvider, checkBuiltInPromptApiStatus, escapeRawPromptTags, sendProviderRequest,
+  hasStructuredTokens, isRepairAcceptable, MAX_QUICK_ENHANCE_CHARS, REPAIR_MAX_CHARS, CancelledError
 } from '../shared/optimizer-engine.js';
 
 const SYSTEM = 'You rewrite prompts.';
@@ -803,4 +805,85 @@ test('refinePrompt, clarifyPrompt, and scoreRetry preserve fallback model overri
     ['openai', 'gpt-4o-mini'],
     ['openai', 'gpt-4o-mini']
   ]);
+});
+
+/* --------------------------------------------------- repairPrompt & guards */
+
+test('hasStructuredTokens detects composer references while ignoring URLs, emails, and file paths', () => {
+  assert.equal(MAX_QUICK_ENHANCE_CHARS, 8000);
+  assert.equal(REPAIR_MAX_CHARS, 2000);
+  assert.equal(hasStructuredTokens('check @file:src/index.ts for bugs'), true);
+  assert.equal(hasStructuredTokens('ask @alice to review'), true);
+  assert.equal(hasStructuredTokens('inspect (@src/app.ts)'), true);
+  assert.equal(hasStructuredTokens('/review this diff'), true);
+  assert.equal(hasStructuredTokens('run (/plan) next'), true);
+
+  assert.equal(hasStructuredTokens('email user@example.com about https://example.com/docs/v1'), false);
+  assert.equal(hasStructuredTokens('edit /usr/local/bin/node or a/b toggle'), false);
+});
+
+test('isRepairAcceptable permits small repairs and rejects empty, identical, or over-expanded outputs', () => {
+  assert.equal(isRepairAcceptable('helo wrld', 'hello world'), true);
+  assert.equal(isRepairAcceptable('hello world', 'hello world'), false);
+  assert.equal(isRepairAcceptable('hello world', ''), false);
+  assert.equal(
+    isRepairAcceptable('wrte a tst', 'Please write a comprehensive integration test suite covering edge cases.'),
+    false
+  );
+  const hundred = 'a'.repeat(100);
+  assert.equal(isRepairAcceptable(hundred, 'a'.repeat(115)), true);
+  assert.equal(isRepairAcceptable(hundred, 'a'.repeat(120)), false);
+});
+
+test('repairPrompt skips > 2000 chars, structured tokens, and offline; degrades safely; and rethrows cancel', async () => {
+  installChromeStub(settings({ preferredEngine: 'openai', openaiApiKey: 'K' }));
+
+  const tooLong = await repairPrompt('x'.repeat(2001));
+  assert.equal(tooLong.changed, false);
+  assert.equal(tooLong.skipped, 'too_long');
+
+  const withMention = await repairPrompt('fix bug in @src/auth.ts');
+  assert.equal(withMention.changed, false);
+  assert.equal(withMention.skipped, 'structured_tokens');
+
+  const offlineRes = await repairPrompt('wrte a tst', { engine: 'offline' });
+  assert.equal(offlineRes.changed, false);
+  assert.equal(offlineRes.skipped, 'offline');
+
+  // Accepts clean repair and passes onStatus retry events
+  let attempt = 0;
+  stubFetch(() => {
+    attempt++;
+    if (attempt === 1) {
+      return jsonResponse({ error: { message: 'rate limit' } }, 429, { 'Retry-After': '0.01' });
+    }
+    return jsonResponse({ choices: [{ message: { content: 'Write a test for login.' } }] });
+  });
+  const statuses = [];
+  const repaired = await repairPrompt('wrte a test for lgoin', { onStatus: s => statuses.push(s) });
+  assert.equal(repaired.changed, true);
+  assert.equal(repaired.repaired, 'Write a test for login.');
+  assert.equal(statuses.length, 1);
+  assert.equal(statuses[0].status, 429);
+
+  // Rejects over-rewrite drift without blocking caller
+  stubFetch(() => jsonResponse({
+    choices: [{ message: { content: 'Here is a dramatically expanded multi-paragraph prompt specification that rewrites everything completely.' } }]
+  }));
+  const driftRejected = await repairPrompt('wrte a test');
+  assert.equal(driftRejected.changed, false);
+  assert.equal(driftRejected.skipped, 'drift_rejected');
+  assert.equal(driftRejected.repaired, 'wrte a test');
+
+  // Non-blocking error fallback
+  stubFetch(() => jsonResponse({ error: { message: 'bad key' } }, 401));
+  const errored = await repairPrompt('wrte a test');
+  assert.equal(errored.changed, false);
+  assert.equal(errored.skipped, 'error');
+  assert.equal(errored.repaired, 'wrte a test');
+
+  // Cancellation rethrows CancelledError instead of masking as unchanged
+  const ctl = new AbortController();
+  ctl.abort();
+  await assert.rejects(repairPrompt('wrte a test', { signal: ctl.signal }), CancelledError);
 });
