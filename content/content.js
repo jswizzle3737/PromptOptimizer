@@ -1,8 +1,8 @@
 /**
  * PromptOptimizer In-Page Content Script
  *
- * Injects a floating trigger pill and a Shadow DOM optimizer modal into AI chat
- * platforms (ChatGPT, Claude, Gemini, Perplexity, …).
+ * Injects a floating quick-enhance star button and a Shadow DOM optimizer modal
+ * into AI chat platforms (ChatGPT, Claude, Gemini, Perplexity, …).
  *
  * Styling comes from the shared design system (shared/theme.css, base.css,
  * components.css) so the in-page surface is visually identical to the popup and
@@ -49,39 +49,6 @@
       -webkit-font-smoothing: antialiased;
     }
     .pc-root *, .pc-root *::before, .pc-root *::after { box-sizing: border-box; }
-
-    .pc-trigger-pill {
-      position: fixed;
-      pointer-events: auto;
-      display: none;
-      align-items: center;
-      gap: 7px;
-      height: 28px;
-      padding: 0 12px;
-      background: var(--bg-raised);
-      color: var(--text-primary);
-      font-size: var(--text-xs);
-      font-weight: var(--weight-semibold);
-      border: 1px solid var(--border-default);
-      border-radius: var(--radius-full);
-      box-shadow: var(--shadow-2);
-      cursor: pointer;
-      user-select: none;
-      z-index: 2147483646;
-      transition:
-        background-color var(--dur-fast) var(--ease-standard),
-        border-color var(--dur-fast) var(--ease-standard),
-        transform var(--dur-fast) var(--ease-standard),
-        box-shadow var(--dur-fast) var(--ease-standard);
-    }
-    .pc-trigger-pill:hover {
-      background: var(--bg-hover);
-      border-color: var(--accent-border);
-      transform: translateY(-1px);
-      box-shadow: var(--shadow-accent);
-    }
-    .pc-trigger-pill:active { transform: translateY(0); }
-    .pc-trigger-pill svg { color: var(--accent-fg); }
 
     .pc-star-btn {
       position: fixed;
@@ -419,11 +386,6 @@
   }
 
   const TEMPLATE = `
-    <button type="button" class="pc-trigger-pill" id="pc-trigger">
-      <span data-icon="wand" data-icon-size="13"></span>
-      <span>Optimize</span>
-    </button>
-
     <button type="button" class="pc-star-btn" id="pc-star-btn" data-state="idle"
             aria-label="Auto-enhance prompt" title="Auto-enhance draft using your preconfigured setup (Alt+click to fix typos only)">
       <span data-icon="star" data-icon-size="15"></span>
@@ -559,7 +521,6 @@
   function wire({ root, ds }) {
     const $ = sel => root.querySelector(sel);
 
-    const trigger = $('#pc-trigger');
     const starBtn = $('#pc-star-btn');
     const backdrop = $('#pc-backdrop');
     const modal = $('.pc-modal');
@@ -689,15 +650,28 @@
       return profile;
     }
 
-    /* Fields the pill and the modal may attach to or read from. Anything that
-       can hold a credential is excluded: the modal copies a field's value into
-       a box that can be sent to a cloud engine. */
+    /* Fields the floating star button and modal may attach to or read from.
+       Anything that can hold a credential is excluded: the modal copies a
+       field's value into a box that can be sent to a cloud engine. */
     const SENSITIVE_HINT = /(^|[^a-z])(pass(word|wd)?|otp|cvv|cvc|ccnum|ssn)([^a-z]|$)/i;
     const SENSITIVE_AUTOCOMPLETE = /(^|\s)(cc-[a-z-]+|current-password|new-password|one-time-code)(\s|$)/i;
     const FIELD_SELECTOR = 'textarea, input, [contenteditable]:not([contenteditable="false"])';
 
+    function getDeepActiveElement() {
+      let active = document.activeElement;
+      while (active && active !== host && active.shadowRoot && active.shadowRoot.activeElement) {
+        active = active.shadowRoot.activeElement;
+      }
+      return active;
+    }
+
+    function getDeepEventTarget(e) {
+      const path = typeof e?.composedPath === 'function' ? e.composedPath() : null;
+      return (path && path.length > 0 ? path[0] : null) || e?.target || null;
+    }
+
     function isEligibleField(el) {
-      if (!el || el.nodeType !== 1 || el === host || host.contains(el)) return false;
+      if (!el || el.nodeType !== 1 || el === host || host.contains(el) || el.getRootNode?.() === shadow) return false;
       if (el.disabled || el.readOnly) return false;
 
       const auto = el.getAttribute('autocomplete') || '';
@@ -1035,7 +1009,7 @@
 
     async function openModal(initialText = '', autoRun = false, { fromContextMenu = false } = {}) {
       // Capture where focus was before the modal takes it, to hand it back on close.
-      const active = document.activeElement;
+      const active = getDeepActiveElement();
       returnFocusTo = (isFieldLike(active) ? active : null) || currentTargetElement || active;
 
       if (isQuickBusy()) {
@@ -1109,7 +1083,7 @@
       returnFocusTo = null;
       if (widgetEnabled) {
         if (currentTargetElement?.isConnected && isEligibleField(currentTargetElement)) {
-          positionTrigger(currentTargetElement);
+          positionStarBtn(currentTargetElement);
         } else {
           autoDetectAndPosition();
         }
@@ -1152,12 +1126,6 @@
        Runs after the handlers above (bubble phase, on the shadow host). */
     ['keydown', 'keyup', 'keypress'].forEach(type => {
       host.addEventListener(type, e => e.stopPropagation());
-    });
-
-    trigger.addEventListener('mousedown', e => e.preventDefault());
-    trigger.addEventListener('click', e => {
-      e.stopPropagation();
-      openModal(window.getSelection().toString().trim());
     });
 
     starBtn.addEventListener('mousedown', e => e.preventDefault());
@@ -1697,7 +1665,7 @@
       const backup = quickState.originalBackup;
       if (undoTarget && writeQuickText(undoTarget, backup)) {
         currentTargetElement = undoTarget;
-        positionTrigger(undoTarget);
+        positionStarBtn(undoTarget);
         resetQuickState();
         toast('Restored original draft', 'neutral');
         return true;
@@ -1728,7 +1696,7 @@
 
     function composerChangedByUser(el, expectedNorm) {
       if (!el?.isConnected || !isEligibleField(el)) return true;
-      return normalizeInsertedText(getElementValue(el)) !== expectedNorm;
+      return !textsMatchSemantically(getElementValue(el), expectedNorm);
     }
 
     function formatQuickRetry(info) {
@@ -1768,7 +1736,7 @@
 
       if (busy) return;
 
-      const active = document.activeElement;
+      const active = getDeepActiveElement();
       if (isFieldLike(active) && !isEligibleField(active)) {
         hideFloatingControls();
         return;
@@ -1882,7 +1850,7 @@
               quickState.lastWritten = normalizeInsertedText(getElementValue(liveTarget));
               quickState.hasAppliedStep1 = true;
               currentTargetElement = liveTarget;
-              positionTrigger(liveTarget);
+              positionStarBtn(liveTarget);
               setStarVisual('repaired', 'Typos repaired — click to revert');
               toast('Typos repaired', 'success', {
                 actionLabel: 'Undo',
@@ -1947,7 +1915,7 @@
                 quickState.hasAppliedStep1 = true;
                 draftForEnhance = rep.repaired;
                 currentTargetElement = step1Target;
-                positionTrigger(step1Target);
+                positionStarBtn(step1Target);
               }
             }
           } catch {
@@ -2010,7 +1978,7 @@
           quickState.target = writeTarget;
           quickState.lastWritten = normalizeInsertedText(getElementValue(writeTarget));
           currentTargetElement = writeTarget;
-          positionTrigger(writeTarget);
+          positionStarBtn(writeTarget);
           setStarVisual('enhanced', 'Prompt enhanced — click to revert to original');
 
           const engineLabel = ENGINE_LABELS[data.engine] || data.engine || '';
@@ -2238,22 +2206,146 @@
     });
 
     /* Element helpers -------------------------------------------------- */
+    const BLOCK_TAGS = new Set([
+      'ADDRESS', 'ARTICLE', 'ASIDE', 'BLOCKQUOTE', 'DD', 'DETAILS', 'DIALOG',
+      'DIV', 'DL', 'DT', 'FIELDSET', 'FIGCAPTION', 'FIGURE', 'FOOTER', 'FORM',
+      'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'HEADER', 'HGROUP', 'HR', 'LI',
+      'MAIN', 'NAV', 'OL', 'P', 'PRE', 'SECTION', 'TABLE', 'TR', 'UL'
+    ]);
+    const IGNORED_CONTENT_TAGS = new Set(['STYLE', 'SCRIPT', 'NOSCRIPT', 'TEMPLATE']);
+
+    /* Reads rich contenteditable elements (Quill, ProseMirror, Lexical, plain
+       div lines) without Chromium's innerText <p>-margin newline inflation. */
+    function readBlockLines(container) {
+      const childNodes = Array.from(container.childNodes);
+      const hasBlockChildren = childNodes.some(n => n.nodeType === 1 && BLOCK_TAGS.has(n.tagName));
+      const lines = [];
+      let inlineBuf = '';
+      let hasInline = false;
+      let endedWithBr = false;
+
+      const flushInline = () => {
+        if (!hasInline) return;
+        let line = inlineBuf;
+        if (endedWithBr && line.endsWith('\n')) {
+          line = line.slice(0, -1);
+        }
+        lines.push(line);
+        inlineBuf = '';
+        hasInline = false;
+        endedWithBr = false;
+      };
+
+      const walkInline = node => {
+        for (const child of node.childNodes) {
+          if (child.nodeType === 3) {
+            const val = child.nodeValue || '';
+            if (hasBlockChildren && !hasInline && /^[ \t]*[\r\n]+[ \t\r\n]*$/.test(val)) {
+              continue;
+            }
+            inlineBuf += val;
+            hasInline = true;
+            endedWithBr = false;
+          } else if (child.nodeType === 1) {
+            if (IGNORED_CONTENT_TAGS.has(child.tagName) || child.hasAttribute('hidden')) continue;
+            if (child.tagName === 'BR') {
+              inlineBuf += '\n';
+              hasInline = true;
+              endedWithBr = true;
+            } else if (BLOCK_TAGS.has(child.tagName)) {
+              flushInline();
+              if (child.tagName === 'HR') {
+                lines.push('');
+              } else {
+                const sub = readBlockLines(child);
+                if (sub.length) {
+                  lines.push(...sub);
+                } else {
+                  lines.push('');
+                }
+              }
+            } else {
+              walkInline(child);
+            }
+          }
+        }
+      };
+
+      walkInline(container);
+      flushInline();
+      return lines;
+    }
+
+    function readContentEditableText(el) {
+      if (!el) return '';
+      const raw = readBlockLines(el).join('\n');
+      return raw.replace(/\r\n?/g, '\n').replace(/\u00a0/g, ' ');
+    }
+
     function getElementValue(el) {
       if (!isEligibleField(el)) return '';
       if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') return el.value;
-      if (el.isContentEditable) return el.innerText || el.textContent;
+      if (el.isContentEditable) return readContentEditableText(el);
       return '';
     }
 
     function normalizeInsertedText(str) {
-      return String(str ?? '').replace(/\r\n?/g, '\n').trim();
+      if (ds?.targetProfiles?.normalizeEditableText) {
+        return ds.targetProfiles.normalizeEditableText(str);
+      }
+      return String(str ?? '')
+        .replace(/\r\n?/g, '\n')
+        .replace(/\u00a0/g, ' ')
+        .trim();
+    }
+
+    function textsMatchSemantically(actual, expected) {
+      if (ds?.targetProfiles?.editableTextsMatch) {
+        return ds.targetProfiles.editableTextsMatch(actual, expected);
+      }
+      const a = normalizeInsertedText(actual);
+      const b = normalizeInsertedText(expected);
+      if (a === b) return true;
+      if (b.includes('\n') && !a.includes('\n')) return false;
+      const canonical = s => s
+        .split('\n')
+        .map(line => line.replace(/[ \t]+/g, ' ').trim())
+        .join('\n')
+        .replace(/\n{2,}/g, '\n')
+        .trim();
+      return Boolean(b) && canonical(a) === canonical(b);
+    }
+
+    function syncQuillState(el, text) {
+      if (!el?.classList?.contains('ql-editor')) return;
+      const isBlank = !normalizeInsertedText(text);
+      if (isBlank && el.children.length === 1 && el.firstElementChild?.tagName === 'P' &&
+          !el.firstElementChild.textContent && !el.firstElementChild.querySelector('br')) {
+        el.firstElementChild.appendChild(document.createElement('br'));
+      }
+      el.classList.toggle('ql-blank', isBlank);
+    }
+
+    function collapseSelectionToEnd(el, selection) {
+      try {
+        const endRange = document.createRange();
+        const targetNode = el.lastElementChild?.tagName === 'P' ? el.lastElementChild : el;
+        endRange.selectNodeContents(targetNode);
+        endRange.collapse(false);
+        selection.removeAllRanges();
+        selection.addRange(endRange);
+      } catch {}
     }
 
     function insertTextIntoElement(el, text) {
       if (!isEligibleField(el)) el = findChatInput();
       if (!el) return false;
 
-      el.focus();
+      try {
+        el.focus({ preventScroll: true });
+      } catch {
+        el.focus();
+      }
 
       if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
         try {
@@ -2262,15 +2354,13 @@
             : window.HTMLInputElement.prototype;
           Object.getOwnPropertyDescriptor(proto, 'value')?.set?.call(el, text);
         } catch {}
-        el.value = text;
+        if (el.value !== text) el.value = text;
         el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
         el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
         return true;
       }
 
       if (el.isContentEditable) {
-        const expected = normalizeInsertedText(text);
-        const hasNewlines = expected.includes('\n');
         const selection = window.getSelection();
         const range = document.createRange();
         range.selectNodeContents(el);
@@ -2280,12 +2370,12 @@
         // 1. execCommand preserves ProseMirror / Lexical / Quill undo stacks when accepted cleanly.
         let ok = false;
         try { ok = document.execCommand('insertText', false, text); } catch { ok = false; }
-        const afterExec = normalizeInsertedText(getElementValue(el));
-        if (ok && afterExec === expected && (!hasNewlines || afterExec.includes('\n'))) {
+        if (ok && textsMatchSemantically(getElementValue(el), text)) {
+          syncQuillState(el, text);
           return true;
         }
 
-        // 2. Synthetic plain-text paste handles multi-line blocks in rich editors that strip execCommand newlines.
+        // 2. Synthetic plain-text paste handles rich editors that ignore execCommand.
         try {
           const dt = new DataTransfer();
           dt.setData('text/plain', text);
@@ -2299,13 +2389,13 @@
           selection.removeAllRanges();
           selection.addRange(pasteRange);
           el.dispatchEvent(pasteEvt);
-          const afterPaste = normalizeInsertedText(getElementValue(el));
-          if (afterPaste === expected && (!hasNewlines || afterPaste.includes('\n'))) {
+          if (textsMatchSemantically(getElementValue(el), text)) {
+            syncQuillState(el, text);
             return true;
           }
         } catch {}
 
-        // 3. Direct DOM fallback for vanilla contenteditable boxes.
+        // 3. Direct DOM fallback (Trusted Types safe: builds <p> blots without innerHTML).
         try {
           el.dispatchEvent(new InputEvent('beforeinput', {
             bubbles: true,
@@ -2314,7 +2404,20 @@
             data: text
           }));
         } catch {}
-        el.innerText = text;
+        if (el.classList.contains('ql-editor') || el.classList.contains('ProseMirror')) {
+          const lines = String(text ?? '').replace(/\r\n?/g, '\n').split('\n');
+          const frag = document.createDocumentFragment();
+          for (const line of lines) {
+            const p = document.createElement('p');
+            if (line.length > 0) p.textContent = line;
+            else p.appendChild(document.createElement('br'));
+            frag.appendChild(p);
+          }
+          el.replaceChildren(frag);
+          syncQuillState(el, text);
+        } else {
+          el.innerText = text;
+        }
         el.dispatchEvent(new InputEvent('input', {
           bubbles: true,
           composed: true,
@@ -2322,24 +2425,18 @@
           data: text
         }));
         el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
-        try {
-          const endRange = document.createRange();
-          endRange.selectNodeContents(el);
-          endRange.collapse(false);
-          selection.removeAllRanges();
-          selection.addRange(endRange);
-        } catch {}
+        collapseSelectionToEnd(el, selection);
         return true;
       }
 
       return false;
     }
 
-    /* Trigger positioning ---------------------------------------------- */
+    /* Star button positioning ------------------------------------------ */
     const FALLBACK_INPUT_SELECTORS = [
       '#prompt-textarea',
-      '[role="textbox"][contenteditable="true"]',
-      'div[contenteditable="true"]',
+      '[role="textbox"][contenteditable]:not([contenteditable="false"])',
+      'div[contenteditable]:not([contenteditable="false"])',
       'textarea'
     ];
     const FALLBACK_COMPOSER_SELECTORS = [
@@ -2347,6 +2444,9 @@
       '[class*="composer" i]',
       '.input-area',
       '.text-input-field',
+      'input-area-v2',
+      'ms-prompt-input',
+      '.prompt-input-wrapper',
       'fieldset',
       'form',
       '[data-testid*="chat-input" i]',
@@ -2363,6 +2463,26 @@
       return r.width > 0 && r.height > 0;
     }
 
+    function getParentAcrossShadow(node) {
+      if (!node) return null;
+      if (node.parentElement) return node.parentElement;
+      const rootNode = node.getRootNode?.();
+      return typeof ShadowRoot === 'function' && rootNode instanceof ShadowRoot ? rootNode.host : null;
+    }
+
+    function closestAcrossShadow(startEl, selector) {
+      let cur = startEl;
+      while (cur) {
+        try {
+          const hit = cur.closest(selector);
+          if (hit) return hit;
+        } catch {}
+        const rootNode = cur.getRootNode?.();
+        cur = typeof ShadowRoot === 'function' && rootNode instanceof ShadowRoot ? rootNode.host : null;
+      }
+      return null;
+    }
+
     function findComposerAnchor(targetEl) {
       if (!targetEl || !targetEl.isConnected) return targetEl;
       const tRect = targetEl.getBoundingClientRect();
@@ -2376,24 +2496,22 @@
         }
         const r = el.getBoundingClientRect();
         if (r.width <= 0 || r.height <= 0) return false;
-        if (r.height > Math.max(tRect.height + 180, 280)) return false;
-        if (r.width > tRect.width + 280) return false;
+        if (r.height > Math.max(tRect.height + 200, 300)) return false;
+        if (r.width > Math.max(tRect.width + 460, tRect.width * 2)) return false;
         return r.width >= tRect.width - 4 && r.height >= tRect.height - 4;
       };
 
       const anchorSelectors = ds?.targetProfiles?.COMPOSER_ANCHOR_SELECTORS || FALLBACK_COMPOSER_SELECTORS;
       for (const sel of anchorSelectors) {
-        try {
-          const matched = targetEl.closest(sel);
-          if (matched && matched !== targetEl && isReasonableContainer(matched)) {
-            return matched;
-          }
-        } catch {}
+        const matched = closestAcrossShadow(targetEl, sel);
+        if (matched && matched !== targetEl && isReasonableContainer(matched)) {
+          return matched;
+        }
       }
 
       let best = targetEl;
-      let cur = targetEl.parentElement;
-      for (let depth = 0; cur && depth < 5; depth += 1, cur = cur.parentElement) {
+      let cur = getParentAcrossShadow(targetEl);
+      for (let depth = 0; cur && depth < 6; depth += 1, cur = getParentAcrossShadow(cur)) {
         if (cur === document.body || cur === document.documentElement || cur.tagName === 'MAIN') break;
         if (!isReasonableContainer(cur)) continue;
         const cs = getComputedStyle(cur);
@@ -2410,18 +2528,19 @@
     let observedTarget = null;
     let observedAnchor = null;
     let positionRafId = 0;
+    let lastStarRender = null;
 
     function hideFloatingControls() {
       if (positionRafId) {
         cancelAnimationFrame(positionRafId);
         positionRafId = 0;
       }
-      trigger.style.display = 'none';
+      lastStarRender = null;
       starBtn.style.display = 'none';
     }
 
     const reposition = () => {
-      if (currentTargetElement && !isModalOpen) positionTrigger(currentTargetElement);
+      if (currentTargetElement && !isModalOpen) positionStarBtn(currentTargetElement);
     };
 
     function observeTarget(targetEl, anchorEl) {
@@ -2439,11 +2558,39 @@
       } catch {}
     }
 
-    function positionTrigger(targetEl) {
+    function collectControlRects(scanRoot, visRect) {
+      if (!scanRoot?.querySelectorAll) return [];
+      const rects = [];
+      let nodes;
+      try {
+        nodes = scanRoot.querySelectorAll('button, [role="button"], [type="submit"]');
+      } catch {
+        return rects;
+      }
+      for (const el of nodes) {
+        if (!isVisibleElement(el) || el === host || host.contains(el)) continue;
+        const r = el.getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0) continue;
+        if (r.height > 96 || r.width > Math.max(visRect.width * 0.7, 240)) continue;
+        rects.push(r);
+      }
+      return rects;
+    }
+
+    function rectOverlapsAny(left, top, size, controlRects, pad = 4) {
+      return controlRects.some(r =>
+        left < r.right + pad &&
+        left + size + pad > r.left &&
+        top < r.bottom + pad &&
+        top + size + pad > r.top
+      );
+    }
+
+    function positionStarBtn(targetEl) {
       if (!targetEl || isModalOpen) return;
       // Nothing shows while focus sits in a field we must not serve (a password
       // box, say) — including when a delayed re-scan fires with it focused.
-      const active = document.activeElement;
+      const active = getDeepActiveElement();
       if (!widgetEnabled || !targetEl.isConnected || !isEligibleField(targetEl) || (isFieldLike(active) && !isEligibleField(active))) {
         hideFloatingControls();
         return;
@@ -2476,74 +2623,112 @@
         ? anchorRect
         : rect;
 
-      const pillW = 124;
-      const pillH = 28;
-      let rawPillTop;
-      if (visRect.top >= 46) {
-        rawPillTop = visRect.top - 36;
-      } else if (visRect.bottom + 8 <= window.innerHeight - 36) {
-        rawPillTop = visRect.bottom + 8;
-      } else {
-        rawPillTop = Math.max(8, visRect.top + 8);
-      }
-      const pillTop = Math.round(Math.max(8, Math.min(window.innerHeight - 36, rawPillTop)));
-      let pillLeft = Math.round(Math.min(window.innerWidth - 140, Math.max(10, visRect.right - 132)));
-
       const starSize = 34;
-      const hasRoomRight = (window.innerWidth - visRect.right) >= 48;
-      const starLeft = hasRoomRight
-        ? Math.round(Math.min(window.innerWidth - starSize - 8, visRect.right + 10))
-        : Math.round(Math.min(window.innerWidth - starSize - 8, Math.max(8, visRect.right - starSize - 8)));
+      const clampX = x => Math.round(Math.max(8, Math.min(window.innerWidth - starSize - 8, x)));
+      const clampY = y => Math.round(Math.max(8, Math.min(window.innerHeight - starSize - 8, y)));
 
-      let starTop;
+      const centered = visRect.top + (visRect.height - starSize) / 2;
+      const minTop = visRect.top + 4;
+      const maxTop = Math.max(minTop, visRect.bottom - starSize - 4);
+      const centeredTop = clampY(
+        visRect.height <= starSize + 12 ? centered : Math.max(minTop, Math.min(maxTop, centered))
+      );
+      const insideTop = clampY(
+        visRect.height >= 48 ? visRect.top + 8 : visRect.top + (visRect.height - starSize) / 2
+      );
+
+      const hasRoomRight = (window.innerWidth - visRect.right) >= starSize + 14;
+      const fallbackLeft = hasRoomRight
+        ? clampX(visRect.right + 10)
+        : clampX(visRect.right - starSize - 8);
+      const fallbackTop = hasRoomRight ? centeredTop : insideTop;
+
+      const scanRoot = closestAcrossShadow(anchorEl || targetEl, 'input-area-v2, .input-area, ms-prompt-input, form, fieldset') ||
+        anchorEl ||
+        getParentAcrossShadow(targetEl);
+      const controlRects = collectControlRects(scanRoot, visRect);
+
+      const candidates = [];
       if (hasRoomRight) {
-        const centered = visRect.top + (visRect.height - starSize) / 2;
-        const minTop = visRect.top + 4;
-        const maxTop = Math.max(minTop, visRect.bottom - starSize - 4);
-        const clampedToBox = visRect.height <= starSize + 12
-          ? centered
-          : Math.max(minTop, Math.min(maxTop, centered));
-        starTop = Math.round(Math.max(8, Math.min(window.innerHeight - starSize - 8, clampedToBox)));
-      } else {
-        const insideTop = visRect.height >= 48 ? visRect.top + 8 : visRect.top + (visRect.height - starSize) / 2;
-        starTop = Math.round(Math.max(8, Math.min(window.innerHeight - starSize - 8, insideTop)));
+        const rightOutside = clampX(visRect.right + 10);
+        candidates.push({ left: rightOutside, top: centeredTop });
+        const blockingRight = controlRects.filter(r =>
+          rightOutside < r.right + 4 && rightOutside + starSize + 4 > r.left &&
+          centeredTop < r.bottom + 4 && centeredTop + starSize + 4 > r.top
+        );
+        if (blockingRight.length) {
+          const clearedRight = Math.round(Math.max(...blockingRight.map(r => r.right)) + 10);
+          if (clearedRight <= window.innerWidth - starSize - 8) {
+            candidates.push({ left: clearedRight, top: centeredTop });
+          }
+        }
+      }
+      const insideRightLeft = clampX(visRect.right - starSize - 8);
+      candidates.push({ left: insideRightLeft, top: insideTop });
+      if (visRect.top >= starSize + 14) {
+        candidates.push({
+          left: clampX(visRect.right - starSize),
+          top: clampY(visRect.top - starSize - 8)
+        });
+      }
+      let shiftLeft = insideRightLeft;
+      for (let i = 0; i < 4; i++) {
+        const blocker = controlRects.find(r =>
+          shiftLeft < r.right + 4 && shiftLeft + starSize + 4 > r.left &&
+          insideTop < r.bottom + 4 && insideTop + starSize + 4 > r.top
+        );
+        if (!blocker) break;
+        const nextLeft = Math.round(blocker.left - starSize - 8);
+        if (nextLeft < visRect.left + 8 || nextLeft >= shiftLeft) break;
+        shiftLeft = clampX(nextLeft);
+        candidates.push({ left: shiftLeft, top: insideTop });
       }
 
-      const overlapY = pillTop < starTop + starSize + 4 && pillTop + pillH + 4 > starTop;
-      const overlapX = pillLeft < starLeft + starSize + 6 && pillLeft + pillW + 6 > starLeft;
-      if (overlapY && overlapX) {
-        pillLeft = Math.round(Math.max(8, starLeft - pillW - 8));
+      const chosen = candidates.find(c => !rectOverlapsAny(c.left, c.top, starSize, controlRects)) ||
+        { left: fallbackLeft, top: fallbackTop };
+
+      if (
+        lastStarRender &&
+        lastStarRender.target === targetEl &&
+        lastStarRender.top === chosen.top &&
+        lastStarRender.left === chosen.left &&
+        lastStarRender.display === 'flex' &&
+        starBtn.style.display === 'flex'
+      ) {
+        return;
       }
 
       if (positionRafId) cancelAnimationFrame(positionRafId);
       positionRafId = requestAnimationFrame(() => {
         positionRafId = 0;
-        const activeNow = document.activeElement;
+        const activeNow = getDeepActiveElement();
         if (isModalOpen || !widgetEnabled || !targetEl.isConnected || (isFieldLike(activeNow) && !isEligibleField(activeNow))) {
           return;
         }
-        trigger.style.top = `${pillTop}px`;
-        trigger.style.left = `${pillLeft}px`;
-        trigger.style.display = 'flex';
-
-        starBtn.style.top = `${starTop}px`;
-        starBtn.style.left = `${starLeft}px`;
+        starBtn.style.top = `${chosen.top}px`;
+        starBtn.style.left = `${chosen.left}px`;
         starBtn.style.display = 'flex';
+        lastStarRender = { target: targetEl, top: chosen.top, left: chosen.left, display: 'flex' };
       });
     }
 
-    /** The field the user most plausibly means: the focused one, else the first visible chat-like box. */
-    function findChatInput() {
-      const focused = fieldFrom(document.activeElement);
-      if (focused) return focused;
-      const profile = resolveSiteProfile();
-      const selectors = ds?.targetProfiles?.getChatInputSelectors
-        ? ds.targetProfiles.getChatInputSelectors(profile)
-        : FALLBACK_INPUT_SELECTORS;
+    function getOpenShadowRoots() {
+      const roots = [];
+      try {
+        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
+        let node;
+        while ((node = walker.nextNode())) {
+          if (node !== host && node.shadowRoot) roots.push(node.shadowRoot);
+        }
+      } catch {}
+      return roots;
+    }
+
+    function findMatchingInputInRoot(rootNode, selectors) {
       for (const selector of selectors) {
         let matches = [];
         try {
-          matches = document.querySelectorAll(selector);
+          matches = rootNode.querySelectorAll(selector);
         } catch {
           continue;
         }
@@ -2554,11 +2739,28 @@
       return null;
     }
 
+    /** The field the user most plausibly means: the focused one, else the first visible chat-like box. */
+    function findChatInput() {
+      const focused = fieldFrom(getDeepActiveElement());
+      if (focused) return focused;
+      const profile = resolveSiteProfile();
+      const selectors = ds?.targetProfiles?.getChatInputSelectors
+        ? ds.targetProfiles.getChatInputSelectors(profile)
+        : FALLBACK_INPUT_SELECTORS;
+      const lightMatch = findMatchingInputInRoot(document, selectors);
+      if (lightMatch) return lightMatch;
+      for (const sr of getOpenShadowRoots()) {
+        const shadowMatch = findMatchingInputInRoot(sr, selectors);
+        if (shadowMatch) return shadowMatch;
+      }
+      return null;
+    }
+
     function autoDetectAndPosition() {
       const input = findChatInput();
       if (input) {
         currentTargetElement = input;
-        positionTrigger(input);
+        positionStarBtn(input);
       } else {
         hideFloatingControls();
       }
@@ -2585,8 +2787,8 @@
       setTimeout(check, 260);
     }
 
-    /* Pages mutate constantly. Re-scan at most every 400 ms, and only when the
-       field we were tracking is gone or no longer visible. */
+    /* Pages mutate constantly. Re-scan at most every 250 ms to discover new
+       composers or keep the star aligned when SPAs shift layout. */
     let scanTimer = 0;
     function scheduleScan() {
       if (scanTimer) return;
@@ -2596,8 +2798,21 @@
         syncQuickResetWatchers();
         if (!currentTargetElement?.isConnected || !isEligibleField(currentTargetElement) || !isVisibleElement(currentTargetElement)) {
           autoDetectAndPosition();
+          return;
         }
-      }, 400);
+        if (widgetEnabled && !isModalOpen) {
+          const active = getDeepActiveElement();
+          const activeInsideCurrent = active === currentTargetElement ||
+            (active instanceof Node && currentTargetElement.contains(active));
+          if (!activeInsideCurrent) {
+            const preferred = findChatInput();
+            if (preferred && preferred !== currentTargetElement) {
+              currentTargetElement = preferred;
+            }
+          }
+          positionStarBtn(currentTargetElement);
+        }
+      }, 250);
     }
 
     try {
@@ -2606,8 +2821,9 @@
 
     document.addEventListener('input', e => {
       if (isQuickWriting || isQuickBusy() || quickState.mode === 'idle') return;
+      const evtTarget = getDeepEventTarget(e);
       const t = quickState.target;
-      if (t && (e.target === t || (e.target instanceof Element && t.contains(e.target)))) {
+      if (t && (evtTarget === t || (evtTarget instanceof Element && t.contains(evtTarget)))) {
         if (!getElementValue(t).trim()) resetQuickState();
       }
     }, true);
@@ -2615,8 +2831,10 @@
     document.addEventListener('keydown', e => {
       if (e.isComposing || e.key !== 'Enter' || e.shiftKey || e.altKey || e.ctrlKey || e.metaKey) return;
       if (!isQuickBusy() && quickState.mode !== 'idle') {
+        const evtTarget = getDeepEventTarget(e);
+        const active = getDeepActiveElement();
         const t = quickState.target;
-        if (t && (e.target === t || document.activeElement === t || (e.target instanceof Element && t.contains(e.target)))) {
+        if (t && (evtTarget === t || active === t || (evtTarget instanceof Element && t.contains(evtTarget)))) {
           scheduleQuickSubmitResetCheck();
         }
       }
@@ -2624,12 +2842,13 @@
 
     document.addEventListener('focusin', e => {
       syncQuickResetWatchers();
-      const el = fieldFrom(e.target);
+      const evtTarget = getDeepEventTarget(e);
+      const el = fieldFrom(evtTarget);
       if (el) {
         if (!isQuickBusy() && quickState.target && el !== quickState.target) resetQuickState();
         currentTargetElement = el;
-        positionTrigger(el);
-      } else if (isFieldLike(e.target)) {
+        positionStarBtn(el);
+      } else if (isFieldLike(evtTarget)) {
         // Focus moved into a field we do not serve (a password box): floating
         // controls must not stay pointing at the previous one.
         hideFloatingControls();
@@ -2637,23 +2856,30 @@
     }, true);
 
     document.addEventListener('click', e => {
-      if (e.target instanceof Element && !host.contains(e.target) && !isQuickBusy() && quickState.mode !== 'idle') {
-        if (e.target.closest('button, [role="button"], [type="submit"]')) {
+      const evtTarget = getDeepEventTarget(e);
+      if (evtTarget instanceof Element && !host.contains(evtTarget) && !isQuickBusy() && quickState.mode !== 'idle') {
+        if (evtTarget.closest('button, [role="button"], [type="submit"]')) {
           scheduleQuickSubmitResetCheck();
         }
       }
-      const el = fieldFrom(e.target);
+      const el = fieldFrom(evtTarget);
       if (el) {
         if (!isQuickBusy() && quickState.target && el !== quickState.target) resetQuickState();
         currentTargetElement = el;
-        positionTrigger(el);
+        positionStarBtn(el);
       }
     }, true);
 
     /* Remember which field a right-click landed on, so the context menu can open
        the modal on it even when nothing is selected. */
     document.addEventListener('contextmenu', e => {
-      lastContextTarget = fieldFrom(e.target);
+      lastContextTarget = fieldFrom(getDeepEventTarget(e));
+    }, true);
+
+    document.addEventListener('transitionend', e => {
+      const evtTarget = getDeepEventTarget(e);
+      if (evtTarget instanceof Element && host.contains(evtTarget)) return;
+      reposition();
     }, true);
 
     window.addEventListener('scroll', reposition, { capture: true, passive: true });

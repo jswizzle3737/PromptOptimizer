@@ -1566,6 +1566,10 @@ async function runTests() {
               respondJson('write a test for login', 0);
               return;
             }
+            if (draft === 'helo  gemni\n\npls expln async') {
+              respondJson('hello  gemini\n\nplease explain async', 0);
+              return;
+            }
             respondJson(draft, 0);
             return;
           }
@@ -1578,12 +1582,114 @@ async function runTests() {
             respondJson(`ENHANCED_MOCK: ${draft}`, 400);
             return;
           }
+          if (draft === 'hello  gemini\n\nplease explain async') {
+            respondJson('### ROLE\nSenior engineer\n\n### TASK\n1. Explain event loop\n2. Compare promises', 0);
+            return;
+          }
           respondJson(`ENHANCED_MOCK: ${draft}`, 0);
         });
         return;
       }
 
       res.writeHead(200, { 'Content-Type': 'text/html' });
+      if (req.url && req.url.startsWith('/gemini')) {
+        res.end(`
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <title>Mock Gemini Quill Composer</title>
+            <style>
+              body { margin: 0; font-family: system-ui, sans-serif; }
+              #gemini-stage { padding: 80px 24px; }
+              .input-area {
+                display: flex;
+                align-items: flex-end;
+                gap: 10px;
+                width: 680px;
+                max-width: 100%;
+                box-sizing: border-box;
+                border: 1px solid #999;
+                border-radius: 24px;
+                padding: 12px 16px;
+                background: #fff;
+              }
+              .text-input-field { flex: 1; min-width: 0; }
+              .ql-editor {
+                white-space: pre-wrap;
+                word-wrap: break-word;
+                min-height: 44px;
+                line-height: 1.4;
+                outline: none;
+              }
+              .ql-editor p { margin: 0; padding: 0; }
+            </style>
+          </head>
+          <body>
+            <div id="gemini-stage">
+              <input-area-v2 id="gemini-composer">
+                <div class="input-area">
+                  <div class="text-input-field">
+                    <rich-textarea>
+                      <div id="ql" class="ql-editor ql-blank textarea" contenteditable="true" role="textbox" aria-label="Enter a prompt for Gemini"><p><br></p></div>
+                    </rich-textarea>
+                  </div>
+                  <button id="gemini-mic" class="mic-button" type="button" style="width: 36px; height: 36px; flex-shrink: 0;">Mic</button>
+                  <button id="gemini-send" class="send-button" type="button" disabled style="width: 36px; height: 36px; flex-shrink: 0;">Send</button>
+                </div>
+              </input-area-v2>
+            </div>
+            <script>
+              const ql = document.getElementById('ql');
+              const sendBtn = document.getElementById('gemini-send');
+              window.__pasteEvents = 0;
+              ql.addEventListener('paste', () => { window.__pasteEvents += 1; });
+
+              let normalizing = false;
+              const syncQuillUi = () => {
+                const text = (ql.innerText || '').trim();
+                const isBlank = text.length === 0;
+                ql.classList.toggle('ql-blank', isBlank);
+                sendBtn.disabled = isBlank;
+              };
+
+              new MutationObserver(() => {
+                syncQuillUi();
+                if (normalizing) return;
+                queueMicrotask(() => {
+                  normalizing = true;
+                  try {
+                    // Simulate Quill asynchronously converting double spaces into space + NBSP.
+                    const walker = document.createTreeWalker(ql, NodeFilter.SHOW_TEXT);
+                    let tn;
+                    while ((tn = walker.nextNode())) {
+                      if (tn.nodeValue && tn.nodeValue.includes('  ')) {
+                        tn.nodeValue = tn.nodeValue.replace(/  /g, ' \\u00a0');
+                      }
+                    }
+                    if (!ql.querySelector('p')) {
+                      const p = document.createElement('p');
+                      p.appendChild(document.createElement('br'));
+                      ql.replaceChildren(p);
+                    }
+                    syncQuillUi();
+                  } finally {
+                    normalizing = false;
+                  }
+                });
+              }).observe(ql, { childList: true, subtree: true, characterData: true });
+
+              sendBtn.addEventListener('click', () => {
+                const p = document.createElement('p');
+                p.appendChild(document.createElement('br'));
+                ql.replaceChildren(p);
+                syncQuillUi();
+              });
+            </script>
+          </body>
+          </html>
+        `);
+        return;
+      }
       if (req.url && req.url.startsWith('/composer')) {
         res.end(`
           <!DOCTYPE html>
@@ -1648,7 +1754,7 @@ async function runTests() {
       await pageClient.send('Page.enable');
       await pageClient.send('Console.enable');
       // A headless page is not focused, so element.focus() would not fire focus
-      // events and the pill logic would go untested.
+      // events and the star button focus/blur logic would go untested.
       await pageClient.send('Emulation.setFocusEmulationEnabled', { enabled: true });
 
       await pageClient.send('Page.navigate', { url: 'http://127.0.0.1:8765/chat' });
@@ -1668,7 +1774,42 @@ async function runTests() {
         awaitPromise
       });
 
-      // Focus the textarea to trigger the floating pill
+      // Helper to open the in-page modal via the service worker command route
+      const openModalViaSwCommand = async (urlFragment) => {
+        await evalInIsolated(`chrome.runtime.sendMessage({ type: 'GET_STATUS' }).catch(() => {})`, true);
+        let activeSw = swClient;
+        const probeSw = async client => {
+          if (!client) return false;
+          try {
+            await client.send('Runtime.evaluate', { expression: '1 + 1', returnByValue: true });
+            return true;
+          } catch {
+            return false;
+          }
+        };
+        if (!(await probeSw(activeSw))) {
+          const targetsRes = await cdpFetch('/json/list');
+          const targets = await targetsRes.json();
+          const sw = targets.find(t => t.type === 'service_worker' && t.url.includes('background/service-worker.js'));
+          if (!sw?.webSocketDebuggerUrl) throw new Error('Service worker target unavailable for modal open command');
+          activeSw = await createCdpClient(sw.webSocketDebuggerUrl);
+          await activeSw.send('Runtime.enable');
+          swClient = activeSw;
+        }
+        await activeSw.send('Runtime.evaluate', {
+          awaitPromise: true,
+          returnByValue: true,
+          expression: `(async () => {
+            const tabs = await chrome.tabs.query({ url: 'http://127.0.0.1/*' });
+            const tab = tabs.find(t => (t.url || '').includes(${JSON.stringify(urlFragment)})) || tabs[0];
+            if (!tab?.id) throw new Error('No matching test tab found');
+            await chrome.tabs.sendMessage(tab.id, { type: 'OPEN_OPTIMIZER_MODAL', payload: { fromShortcut: true } });
+            return tab.id;
+          })()`
+        });
+      };
+
+      // Focus the textarea to verify ONLY the floating star button renders (no Optimize pill)
       console.log('→ Focusing chat textarea #prompt-textarea...');
       await pageClient.send('Runtime.evaluate', {
         expression: `
@@ -1679,61 +1820,54 @@ async function runTests() {
       });
       await sleep(400);
 
-      // Verify trigger pill AND floating star button are displayed without overlap
-      const pillCheck = await evalInIsolated(`
+      // Verify legacy Optimize pill does NOT exist and floating star button sits on the far right
+      const starOnlyCheck = await evalInIsolated(`
         (() => {
           const shadow = document.getElementById('promptcraft-root-host').shadowRoot;
-          const pill = shadow.querySelector('.pc-trigger-pill');
+          const legacyPill = shadow.querySelector('#pc-trigger, .pc-trigger-pill');
           const star = shadow.querySelector('#pc-star-btn');
           const ta = document.getElementById('prompt-textarea');
-          const pRect = pill.getBoundingClientRect();
           const sRect = star.getBoundingClientRect();
           const taRect = ta.getBoundingClientRect();
-          const overlapsPill = !(pRect.right <= sRect.left || pRect.left >= sRect.right || pRect.bottom <= sRect.top || pRect.top >= sRect.bottom);
           return {
-            display: pill.style.display,
-            text: pill.textContent.trim(),
+            hasLegacyPill: Boolean(legacyPill),
             starDisplay: star.style.display,
             starHasSvg: Boolean(star.querySelector('svg')),
             starOnFarRight: sRect.left >= taRect.right - 2,
-            starInViewport: sRect.right <= window.innerWidth && sRect.bottom <= window.innerHeight && sRect.left >= 0 && sRect.top >= 0,
-            overlapsPill
+            starInViewport: sRect.right <= window.innerWidth && sRect.bottom <= window.innerHeight && sRect.left >= 0 && sRect.top >= 0
           };
         })()
       `);
-      const pc = pillCheck.result.value;
-      console.log(`✓ Floating Trigger Visible: display="${pc.display}", text="${pc.text}", star="${pc.starDisplay}" (farRight=${pc.starOnFarRight}, overlap=${pc.overlapsPill})`);
-      if (pc.display !== 'flex' || pc.starDisplay !== 'flex' || !pc.starHasSvg || !pc.starOnFarRight || !pc.starInViewport || pc.overlapsPill) {
-        throw new Error(`Floating trigger / star placement assertion failed: ${JSON.stringify(pc)}`);
+      const sc = starOnlyCheck.result.value;
+      console.log(`✓ Floating Star Button Only (no legacy Optimize pill): display="${sc.starDisplay}", hasLegacyPill=${sc.hasLegacyPill} (farRight=${sc.starOnFarRight})`);
+      if (sc.hasLegacyPill || sc.starDisplay !== 'flex' || !sc.starHasSvg || !sc.starOnFarRight || !sc.starInViewport) {
+        throw new Error(`Star-only placement assertion failed: ${JSON.stringify(sc)}`);
       }
 
-      // Capture-phase scroll listener must hide both controls when textarea scrolls out of view
-      const scrollPillCheck = await pageClient.send('Runtime.evaluate', {
+      // Capture-phase scroll listener must hide star button when textarea scrolls out of view
+      const scrollStarCheck = await pageClient.send('Runtime.evaluate', {
         awaitPromise: true,
         returnByValue: true,
         expression: `(async () => {
           const scroller = document.getElementById('chat-scroller');
           const shadow = document.getElementById('promptcraft-root-host').shadowRoot;
-          const pill = shadow.querySelector('.pc-trigger-pill');
           const star = shadow.querySelector('#pc-star-btn');
           scroller.scrollTop = 450;
           await new Promise(r => setTimeout(r, 250));
-          const whenScrolledOut = pill.style.display;
           const starScrolledOut = star.style.display;
           scroller.scrollTop = 0;
           await new Promise(r => setTimeout(r, 250));
-          const whenScrolledBack = pill.style.display;
           const starScrolledBack = star.style.display;
-          return { whenScrolledOut, starScrolledOut, whenScrolledBack, starScrolledBack };
+          return { starScrolledOut, starScrolledBack };
         })()`
       });
-      const spc = scrollPillCheck.result.value;
-      if (spc.whenScrolledOut !== 'none' || spc.starScrolledOut !== 'none' || spc.whenScrolledBack !== 'flex' || spc.starScrolledBack !== 'flex') {
-        throw new Error(`Floating controls did not hide/restore on container scroll: ${JSON.stringify(spc)}`);
+      const ssc = scrollStarCheck.result.value;
+      if (ssc.starScrolledOut !== 'none' || ssc.starScrolledBack !== 'flex') {
+        throw new Error(`Floating star button did not hide/restore on container scroll: ${JSON.stringify(ssc)}`);
       }
-      console.log('✓ Floating pill and star button hide when target scrolls offscreen and return on scroll back');
+      console.log('✓ Floating star button hides when target scrolls offscreen and returns on scroll back');
 
-      // Both controls must follow the chat box, never a credential field.
+      // Star button must follow the chat box, never a credential field.
       const sensitiveCheck = await pageClient.send('Runtime.evaluate', {
         awaitPromise: true,
         returnByValue: true,
@@ -1744,7 +1878,6 @@ async function runTests() {
             await new Promise(r => setTimeout(r, 300));
             const shadow = document.getElementById('promptcraft-root-host').shadowRoot;
             out[id] = {
-              pill: shadow.querySelector('.pc-trigger-pill').style.display,
               star: shadow.querySelector('#pc-star-btn').style.display
             };
           }
@@ -1753,9 +1886,9 @@ async function runTests() {
           return out;
         })()`
       });
-      console.log('✓ Controls display after focusing sensitive fields:', sensitiveCheck.result.value);
+      console.log('✓ Star button display after focusing sensitive fields:', sensitiveCheck.result.value);
       for (const [id, st] of Object.entries(sensitiveCheck.result.value)) {
-        if (st.pill !== 'none' || st.star !== 'none') throw new Error(`Controls stayed visible on sensitive field #${id}: ${JSON.stringify(st)}`);
+        if (st.star !== 'none') throw new Error(`Star button stayed visible on sensitive field #${id}: ${JSON.stringify(st)}`);
       }
 
       // Clicking star when the draft is empty gives friendly feedback without opening the modal
@@ -1778,12 +1911,9 @@ async function runTests() {
       }
       console.log('✓ Clicking star button with empty draft prompts cleanly without opening modal');
 
-      // Click the trigger pill to open modal
-      console.log('→ Clicking floating trigger pill...');
-      await evalInIsolated(`
-        const shadow = document.getElementById('promptcraft-root-host').shadowRoot;
-        shadow.querySelector('.pc-trigger-pill').click();
-      `);
+      // Open the modal via OPEN_OPTIMIZER_MODAL command (Alt+O / Context menu path)
+      console.log('→ Opening optimizer modal via OPEN_OPTIMIZER_MODAL command...');
+      await openModalViaSwCommand('/chat');
       await sleep(400);
 
       // Verify modal opened and pre-filled with textarea value
@@ -2269,6 +2399,149 @@ async function runTests() {
         throw new Error(`Submit auto-reset check failed: ${JSON.stringify(csr)}`);
       }
       console.log('✓ Send click clearing composer automatically resets star button back to idle');
+
+      // Test Gemini Quill rich-editor behavior (/gemini): multi-line repair->enhance, no paste event, NBSP survival, revert fidelity, layout shift, narrow viewport button clearance, and submit reset
+      console.log('→ Testing Gemini Quill composer fixture (/gemini)...');
+      isolatedContextId = null;
+      await pageClient.send('Page.navigate', { url: 'http://127.0.0.1:8765/gemini' });
+      for (let i = 0; i < 40 && !isolatedContextId; i++) await sleep(100);
+      await sleep(500);
+
+      const geminiRes = await evalInIsolated(`(async () => {
+        const wait = ms => new Promise(r => setTimeout(r, ms));
+        const until = async (fn, ms = 8000) => { const t = Date.now(); while (Date.now() - t < ms) { const v = fn(); if (v) return v; await wait(50); } return null; };
+        const stored = await chrome.storage.local.get('promptcraft_settings');
+        const baseSettings = stored.promptcraft_settings || {};
+        await chrome.storage.local.set({
+          promptcraft_settings: {
+            ...baseSettings,
+            preferredEngine: 'omniroute',
+            omnirouteEnabled: true,
+            omnirouteBaseUrl: 'http://127.0.0.1:8765/v1',
+            preferredFramework: 'rtf',
+            quickRepairEnabled: true,
+            enableFloatingWidget: true
+          }
+        });
+        await wait(250);
+
+        const shadow = await until(() => document.getElementById('promptcraft-root-host')?.shadowRoot);
+        const star = await until(() => shadow.querySelector('#pc-star-btn'));
+        const legacyPill = shadow.querySelector('#pc-trigger, .pc-trigger-pill');
+        await until(() => star.style.display === 'flex');
+
+        const ql = document.getElementById('ql');
+        const sendBtn = document.getElementById('gemini-send');
+        const micBtn = document.getElementById('gemini-mic');
+
+        const rectOverlap = (a, b) => !(a.right <= b.left || a.left >= b.right || a.bottom <= b.top || a.top >= b.bottom);
+
+        const starInitialRect = star.getBoundingClientRect();
+        const clearsButtonsInitially =
+          !rectOverlap(starInitialRect, sendBtn.getBoundingClientRect()) &&
+          !rectOverlap(starInitialRect, micBtn.getBoundingClientRect());
+
+        // Populate multi-line draft with blank <p><br></p> paragraph and double space
+        const mkP = txt => {
+          const p = document.createElement('p');
+          if (txt) p.textContent = txt;
+          else p.appendChild(document.createElement('br'));
+          return p;
+        };
+        ql.replaceChildren(mkP('helo  gemni'), mkP(''), mkP('pls expln async'));
+        ql.focus();
+        await wait(150);
+
+        star.click();
+        const enhancedOk = await until(() => star.dataset.state === 'enhanced' && ql.textContent.includes('Explain event loop'));
+        await wait(100);
+        const enhancedPs = Array.from(ql.querySelectorAll('p')).map(p => p.textContent);
+        const enhancedBlankClass = ql.classList.contains('ql-blank');
+        const sendEnabledWhenEnhanced = !sendBtn.disabled;
+
+        // Revert via in-button click and check exact multi-line restoration
+        star.click();
+        const revertedOk = await until(() => star.dataset.state === 'idle');
+        await wait(120);
+        const revertedParagraphs = Array.from(ql.querySelectorAll('p')).map(p => (p.textContent || '').replace(/\\u00a0/g, ' '));
+
+        // Layout shift without resize: star must move down with composer
+        const beforeShiftTop = star.getBoundingClientRect().top;
+        const composer = document.getElementById('gemini-composer');
+        composer.style.display = 'block';
+        composer.style.marginTop = '180px';
+        await wait(450);
+        const afterShiftTop = star.getBoundingClientRect().top;
+
+        // Submit auto-reset: enhance then click Send clearing back to <p><br></p>
+        star.click();
+        await until(() => star.dataset.state === 'enhanced');
+        sendBtn.click();
+        const resetAfterSubmit = await until(() => star.dataset.state === 'idle' && ql.classList.contains('ql-blank'), 2500);
+
+        return {
+          hasLegacyPill: Boolean(legacyPill),
+          clearsButtonsInitially,
+          enhancedOk: Boolean(enhancedOk),
+          enhancedPs,
+          enhancedBlankClass,
+          sendEnabledWhenEnhanced,
+          revertedOk: Boolean(revertedOk),
+          revertedParagraphs,
+          shiftDeltaTop: Math.round(afterShiftTop - beforeShiftTop),
+          resetAfterSubmit: Boolean(resetAfterSubmit)
+        };
+      })()`, true);
+
+      const pasteEventsCount = (await pageClient.send('Runtime.evaluate', {
+        expression: 'window.__pasteEvents',
+        returnByValue: true
+      })).result.value;
+
+      // Also test narrow viewport (Split / Canvas width) on /gemini to ensure star clears Send and Mic
+      await pageClient.send('Emulation.setDeviceMetricsOverride', { width: 720, height: 800, deviceScaleFactor: 1, mobile: false });
+      await sleep(400);
+      const narrowCheck = await evalInIsolated(`
+        (() => {
+          const shadow = document.getElementById('promptcraft-root-host').shadowRoot;
+          const star = shadow.querySelector('#pc-star-btn');
+          const s = star.getBoundingClientRect();
+          const send = document.getElementById('gemini-send').getBoundingClientRect();
+          const mic = document.getElementById('gemini-mic').getBoundingClientRect();
+          const rectOverlap = (a, b) => !(a.right <= b.left || a.left >= b.right || a.bottom <= b.top || a.top >= b.bottom);
+          return {
+            display: star.style.display,
+            inViewport: s.left >= 0 && s.top >= 0 && s.right <= window.innerWidth && s.bottom <= window.innerHeight,
+            overlapsSend: rectOverlap(s, send),
+            overlapsMic: rectOverlap(s, mic)
+          };
+        })()
+      `);
+      await pageClient.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+      await sleep(200);
+
+      const gr = geminiRes.result.value;
+      const nc = narrowCheck.result.value;
+      if (
+        gr.hasLegacyPill ||
+        !gr.clearsButtonsInitially ||
+        !gr.enhancedOk ||
+        gr.enhancedBlankClass ||
+        !gr.sendEnabledWhenEnhanced ||
+        JSON.stringify(gr.enhancedPs) !== JSON.stringify(['### ROLE', 'Senior engineer', '', '### TASK', '1. Explain event loop', '2. Compare promises']) ||
+        !gr.revertedOk ||
+        JSON.stringify(gr.revertedParagraphs) !== JSON.stringify(['helo  gemni', '', 'pls expln async']) ||
+        Math.abs(gr.shiftDeltaTop - 180) > 10 ||
+        !gr.resetAfterSubmit ||
+        pasteEventsCount !== 0 ||
+        nc.display !== 'flex' ||
+        !nc.inViewport ||
+        nc.overlapsSend ||
+        nc.overlapsMic
+      ) {
+        throw new Error(`Gemini Quill composer check failed: ${JSON.stringify({ gr, pasteEventsCount, nc })}`);
+      }
+      console.log('✓ Gemini Quill fixture verified: multi-line repair->enhance (0 paste events, NBSP safe), exact <p> revert, layout-shift tracking, narrow-viewport button clearance, and submit reset');
 
       // Navigate back to /chat and test full two-stage Repair -> Enhance, Alt+Click, in-button Revert, Cancel & Guards
       console.log('→ Testing two-stage Repair -> Enhance pipeline, Alt+Click, in-button Revert, mid-flight Cancel & Snapshot Guards...');

@@ -125,54 +125,58 @@ export function getTargetProfile(hostOrUrl) {
    off-target controls are skipped cleanly in favor of the live AI composer. */
 export const PLATFORM_INPUT_SELECTORS = {
   gemini: [
-    'rich-textarea div.ql-editor[contenteditable="true"]',
-    'div.ql-editor.textarea[contenteditable="true"]',
+    'input-area-v2 rich-textarea div.ql-editor[contenteditable]:not([contenteditable="false"])',
+    '.input-area rich-textarea div.ql-editor[contenteditable]:not([contenteditable="false"])',
+    'rich-textarea div.ql-editor[contenteditable]:not([contenteditable="false"])',
+    'div.ql-editor.textarea[contenteditable]:not([contenteditable="false"])',
+    'div.ql-editor[aria-label*="prompt" i][contenteditable]:not([contenteditable="false"])',
     'ms-autosize-textarea textarea',
     'textarea[aria-label*="Enter a prompt" i]',
-    'div[contenteditable="true"][role="textbox"]'
+    'textarea[aria-label*="Type something" i]',
+    'div[contenteditable][role="textbox"]:not([contenteditable="false"])'
   ],
   openai: [
-    '#prompt-textarea[contenteditable="true"]',
+    '#prompt-textarea[contenteditable]:not([contenteditable="false"])',
     '#prompt-textarea',
     'textarea[data-id="root"]',
-    'div.ProseMirror[contenteditable="true"]'
+    'div.ProseMirror[contenteditable]:not([contenteditable="false"])'
   ],
   claude: [
-    'div.ProseMirror[contenteditable="true"]',
+    'div.ProseMirror[contenteditable]:not([contenteditable="false"])',
     '[data-testid="chat-input"]',
-    'fieldset [contenteditable="true"]',
-    'div[contenteditable="true"][role="textbox"]'
+    'fieldset [contenteditable]:not([contenteditable="false"])',
+    'div[contenteditable][role="textbox"]:not([contenteditable="false"])'
   ],
   perplexity: [
-    '#ask-input[contenteditable="true"]',
+    '#ask-input[contenteditable]:not([contenteditable="false"])',
     '#ask-input',
     'textarea[placeholder*="Ask" i]',
-    'div[contenteditable="true"][role="textbox"]'
+    'div[contenteditable][role="textbox"]:not([contenteditable="false"])'
   ],
   deepseek: [
     'textarea#chat-input',
     'textarea[placeholder*="DeepSeek" i]'
   ],
   grok: [
-    'div.ProseMirror[contenteditable="true"]',
+    'div.ProseMirror[contenteditable]:not([contenteditable="false"])',
     'textarea[aria-label*="Grok" i]',
     'textarea[placeholder*="Ask" i]'
   ],
   copilot: [
     '#userInput',
     'textarea[placeholder*="Copilot" i]',
-    'div[contenteditable="true"][role="textbox"]'
+    'div[contenteditable][role="textbox"]:not([contenteditable="false"])'
   ],
   mistral: [
-    'div.ProseMirror[contenteditable="true"]',
+    'div.ProseMirror[contenteditable]:not([contenteditable="false"])',
     'textarea[placeholder*="Mistral" i]'
   ]
 };
 
 export const GENERIC_INPUT_SELECTORS = [
   '#prompt-textarea',
-  '[role="textbox"][contenteditable="true"]',
-  'div[contenteditable="true"]',
+  '[role="textbox"][contenteditable]:not([contenteditable="false"])',
+  'div[contenteditable]:not([contenteditable="false"])',
   'textarea'
 ];
 
@@ -181,11 +185,43 @@ export const COMPOSER_ANCHOR_SELECTORS = [
   '[class*="composer" i]',
   '.input-area',
   '.text-input-field',
+  'input-area-v2',
+  'ms-prompt-input',
+  '.prompt-input-wrapper',
   'fieldset',
   'form',
   '[data-testid*="chat-input" i]',
   'rich-textarea'
 ];
+
+/**
+ * Normalize text read from or written to rich editors: unify CRLF and NBSP.
+ */
+export function normalizeEditableText(str) {
+  return String(str ?? '')
+    .replace(/\r\n?/g, '\n')
+    .replace(/\u00a0/g, ' ')
+    .trim();
+}
+
+/**
+ * Semantic equality for rich editors (Quill / ProseMirror / Lexical) that may
+ * adjust whitespace, NBSP, or consecutive blank paragraphs across ticks while
+ * still preserving line structure.
+ */
+export function editableTextsMatch(actual, expected) {
+  const a = normalizeEditableText(actual);
+  const b = normalizeEditableText(expected);
+  if (a === b) return true;
+  if (b.includes('\n') && !a.includes('\n')) return false;
+  const canonical = s => s
+    .split('\n')
+    .map(line => line.replace(/[ \t]+/g, ' ').trim())
+    .join('\n')
+    .replace(/\n{2,}/g, '\n')
+    .trim();
+  return Boolean(b) && canonical(a) === canonical(b);
+}
 
 /**
  * Return ordered CSS selectors for finding the primary chat composer on a host.

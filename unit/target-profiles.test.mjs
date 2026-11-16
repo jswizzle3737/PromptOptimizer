@@ -4,7 +4,7 @@ import { installChromeStub } from './helpers.mjs';
 import {
   getTargetProfile, buildExplanationChips, TARGET_PROFILES, TECHNIQUES,
   PLATFORM_INPUT_SELECTORS, GENERIC_INPUT_SELECTORS, COMPOSER_ANCHOR_SELECTORS,
-  getChatInputSelectors
+  getChatInputSelectors, normalizeEditableText, editableTextsMatch
 } from '../shared/target-profiles.js';
 import { hasIcon, icon } from '../shared/icons.js';
 import { generateOfflineOptimization, DEFAULT_FRAMEWORKS, analyzePromptSignals } from '../shared/frameworks.js';
@@ -60,6 +60,9 @@ test('getChatInputSelectors prioritizes recognized platform selectors before gen
   const aiStudioSelectors = getChatInputSelectors(getTargetProfile('aistudio.google.com'));
   assert.deepEqual(geminiSelectors, aiStudioSelectors);
   assert.equal(geminiSelectors[0], PLATFORM_INPUT_SELECTORS.gemini[0]);
+  assert.match(geminiSelectors[0], /^input-area-v2\s+rich-textarea\s+div\.ql-editor/);
+  assert.match(geminiSelectors[0], /:not\(\[contenteditable="false"\]\)/);
+  assert.ok(geminiSelectors.includes('ms-autosize-textarea textarea'), 'AI Studio textarea selector included');
   for (const g of GENERIC_INPUT_SELECTORS) {
     assert.ok(geminiSelectors.includes(g), `expected generic fallback ${g}`);
   }
@@ -71,6 +74,23 @@ test('getChatInputSelectors prioritizes recognized platform selectors before gen
     COMPOSER_ANCHOR_SELECTORS.indexOf('.input-area') < COMPOSER_ANCHOR_SELECTORS.indexOf('rich-textarea'),
     'outer composer wrapper should precede rich-textarea so buttons inside .input-area are cleared'
   );
+  assert.ok(
+    COMPOSER_ANCHOR_SELECTORS.indexOf('.input-area') < COMPOSER_ANCHOR_SELECTORS.indexOf('.text-input-field'),
+    '.input-area should precede .text-input-field so external adjacent send buttons are included'
+  );
+  assert.ok(COMPOSER_ANCHOR_SELECTORS.includes('input-area-v2'));
+  assert.ok(COMPOSER_ANCHOR_SELECTORS.includes('ms-prompt-input'));
+});
+
+test('normalizeEditableText and editableTextsMatch tolerate NBSP and whitespace normalization while preserving newline structure', () => {
+  assert.equal(normalizeEditableText('  hello\u00a0world\r\nline 2\r '), 'hello world\nline 2');
+  assert.equal(editableTextsMatch('Role:\u00a0\u00a0Expert\n\nTask:  Help', 'Role: Expert\n\nTask: Help'), true);
+  assert.equal(editableTextsMatch('First\nSecond', 'First\n\nSecond'), true);
+  assert.equal(editableTextsMatch('First Second', 'First\nSecond'), false, 'must reject flattened single-line output when multi-line expected');
+  assert.equal(editableTextsMatch('First\nThird', 'First\nSecond\nThird'), false, 'must detect missing lines or edits');
+  assert.equal(editableTextsMatch('draft edited', 'draft'), false);
+  assert.equal(editableTextsMatch('unexpected', ''), false);
+  assert.equal(editableTextsMatch('', ''), true);
 });
 
 test('star and undo icons are registered for quick chat enhancement', () => {
