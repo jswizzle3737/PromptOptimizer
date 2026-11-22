@@ -1527,6 +1527,7 @@ async function runTests() {
     console.log('\n[6/6] Testing Content Script & In-Page Floating Widget on Mock Chat Interface...');
     const http = require('http');
     const pendingMockTimers = new Set();
+    let emailRequests = 0;
     const server = http.createServer((req, res) => {
       if (req.method === 'POST' && req.url === '/v1/chat/completions') {
         let body = '';
@@ -1543,18 +1544,6 @@ async function runTests() {
           const rawMatch = userMsg.match(/<raw_prompt>\n?([\s\S]*?)\n?<\/raw_prompt>/);
           const draft = (rawMatch ? rawMatch[1] : userMsg).trim();
           const isRepair = sys.includes('copy-editor repairing');
-           if (userMsg.includes('<incoming_email>')) {
-             if (!userMsg.includes('Can we meet Thursday?') || !userMsg.includes('Lead with the answer.') ||
-                 !userMsg.includes('Ask for an agenda.') || !userMsg.includes('Thanks for checking in.') ||
-                 userMsg.includes('Do not include this sample.')) {
-               res.writeHead(400, { 'Content-Type': 'application/json' });
-               res.end(JSON.stringify({ error: { message: 'Unexpected email drafting fields' } }));
-               return;
-             }
-             res.writeHead(200, { 'Content-Type': 'application/json' });
-             res.end(JSON.stringify({ choices: [{ message: { content: 'Thursday works for me. Could you send the agenda?' } }] }));
-             return;
-           }
 
           const respondJson = (content, delayMs = 0) => {
             const sendPayload = () => {
@@ -1574,6 +1563,20 @@ async function runTests() {
               sendPayload();
             }
           };
+
+          if (userMsg.includes('<incoming_email>')) {
+            emailRequests++;
+            if (!userMsg.includes('Can we meet Thursday?') || !userMsg.includes('Lead with the answer.') ||
+                !userMsg.includes('Ask for an agenda.') || !userMsg.includes('Thanks for checking in.') ||
+                userMsg.includes('Do not include this sample.') ||
+                (userMsg.includes('From: Pat') && !userMsg.includes('Ask for an agenda.\nKeep it concise.'))) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: { message: 'Unexpected email drafting fields' } }));
+              return;
+            }
+            respondJson('Thursday works for me. Could you send the agenda?', userMsg.includes('__GMAIL_WAIT__') ? 3000 : 0);
+            return;
+          }
 
           if (isRepair) {
             if (draft.includes('__SLOW_STEP1__')) {
@@ -2993,9 +2996,11 @@ async function runTests() {
       const gmailTab = await (await cdpFetch('/json/new', { method: 'PUT' })).json();
       const gmail = await createCdpClient(gmailTab.webSocketDebuggerUrl);
       const gmailUrl = 'https://mail.google.com/mail/u/0/promptoptimizer-test';
-      const fixture = '<main role="main"><div class="adn"><div class="a3s">Can we meet Thursday?</div></div>' +
-        '<div contenteditable="true" role="textbox" g_editable="true"><div>Ask for an agenda.' +
-        '<div class="gmail_signature">Alex</div></div><div class="gmail_quote">Quoted text</div></div></main>';
+      const originalGmailDraft = '<div>Ask for an agenda.<br>Keep it concise.' +
+        '<div class="gmail_signature">Alex</div></div><div class="gmail_quote">Quoted text</div>';
+      const fixture = '<main role="main"><div class="adn"><span class="gD">Pat</span>' +
+        '<div class="a3s">Can we meet Thursday?</div></div><div contenteditable="true" role="textbox" g_editable="true">' +
+        originalGmailDraft + '</div></main>';
       gmail.onEvent(event => {
         if (event.method === 'Fetch.requestPaused') {
           const { request, requestId } = event.params;
@@ -3032,11 +3037,15 @@ async function runTests() {
           })()`, awaitPromise: true, returnByValue: true
         });
         if (!found.result.value) throw new Error('Gmail control missing: ' + selector);
-        await gmail.send('Input.dispatchMouseEvent', { ...found.result.value, type: 'mousePressed' });
-        await gmail.send('Input.dispatchMouseEvent', { ...found.result.value, type: 'mouseReleased' });
+        return found.result.value;
       };
-      await gmailButton('.gmail-reply__button');
-      await gmailButton('.pc-secret-notice:not([hidden]) [data-act="send"]');
+      const clickGmail = async selector => {
+        const button = await gmailButton(selector);
+        await gmail.send('Input.dispatchMouseEvent', { ...button, type: 'mousePressed' });
+        await gmail.send('Input.dispatchMouseEvent', { ...button, type: 'mouseReleased' });
+      };
+      await clickGmail('.gmail-reply__button');
+      await clickGmail('.pc-secret-notice:not([hidden]) [data-act="send"]');
       const inserted = await gmail.send('Runtime.evaluate', {
         expression: `(async () => {
           const editor = document.querySelector('[g_editable]');
@@ -3053,6 +3062,51 @@ async function runTests() {
         throw new Error('Gmail draft did not preserve the signature and quoted text: ' + JSON.stringify(inline));
       }
       console.log('✓ Gmail reply star used the saved style, requested approval, and inserted a draft with the signature and quote intact');
+
+      const setGmailDraft = html => gmail.send('Runtime.evaluate', {
+        expression: `(() => {
+          const editor = document.querySelector('[g_editable]');
+          editor.innerHTML = ${JSON.stringify(html)};
+          editor.dispatchEvent(new InputEvent('input', {bubbles:true}));
+        })()`
+      });
+      const verifyGmailStopped = async (phrase, expectedDraft) => {
+        const result = await gmail.send('Runtime.evaluate', {
+          expression: `(async () => {
+            const ui = document.querySelector('[data-promptoptimizer-gmail]').shadowRoot;
+            for (let i = 0; i < 50; i++) {
+              if (ui.querySelector('.gmail-reply__status').textContent.includes(${JSON.stringify(phrase)}) &&
+                  ui.querySelector('.gmail-reply__button').textContent.includes('Draft reply')) {
+                return document.querySelector('[g_editable]').innerHTML === ${JSON.stringify(expectedDraft)} &&
+                  !ui.querySelector('.pc-secret-notice:not([hidden])');
+              }
+              await new Promise(resolve => setTimeout(resolve, 60));
+            }
+            return false;
+          })()`, awaitPromise: true, returnByValue: true
+        });
+        if (!result.result.value) throw new Error('Gmail did not preserve the draft after ' + phrase);
+      };
+      const countBeforeEdits = emailRequests;
+      await setGmailDraft(originalGmailDraft);
+      await clickGmail('.gmail-reply__button');
+      await gmailButton('.pc-secret-notice:not([hidden]) [data-act="send"]');
+      const userEdit = '<p>I can also meet Friday.</p>';
+      await setGmailDraft(userEdit);
+      await verifyGmailStopped('Your edits were kept', userEdit);
+      if (emailRequests !== countBeforeEdits) throw new Error('Gmail dispatched a draft without approval.');
+
+      const slowDraft = originalGmailDraft.replace('Keep it concise.', 'Keep it concise. __GMAIL_WAIT__');
+      await setGmailDraft(slowDraft);
+      await clickGmail('.gmail-reply__button');
+      await clickGmail('.pc-secret-notice:not([hidden]) [data-act="send"]');
+      for (let i = 0; i < 30 && !pendingMockTimers.size; i++) await sleep(50);
+      if (!pendingMockTimers.size) throw new Error('Gmail cancellation fixture did not start a provider request.');
+      await clickGmail('.gmail-reply__button');
+      await verifyGmailStopped('Drafting cancelled', slowDraft);
+      for (let i = 0; i < 30 && pendingMockTimers.size; i++) await sleep(40);
+      if (pendingMockTimers.size) throw new Error('The Gmail provider request continued after cancellation.');
+      console.log('✓ Gmail edits dismiss stale approval and cancellation stops an in-flight provider request');
       gmail.close();
       optionsClient.close();
       otherClient.close();

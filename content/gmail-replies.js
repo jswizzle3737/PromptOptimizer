@@ -19,6 +19,12 @@
     return node.getClientRects().length > 0 && getComputedStyle(node).visibility === 'visible';
   }
 
+  function plainText(fragment) {
+    fragment.querySelectorAll('br').forEach(node => node.replaceWith('\n'));
+    fragment.querySelectorAll('p, div, li').forEach(node => node.append('\n'));
+    return fragment.textContent.replace(/\n{3,}/g, '\n\n').trim();
+  }
+
   function extractThread(pane, limit) {
     const messages = [...pane.querySelectorAll(messageSelector)].filter(isVisible).slice(-4);
     let available = limit;
@@ -26,10 +32,10 @@
     for (const message of messages.reverse()) {
       const copy = message.cloneNode(true);
       copy.querySelectorAll('.gmail_quote, blockquote, [hidden], [aria-hidden="true"]').forEach(node => node.remove());
-      copy.querySelectorAll('br, p, div, li').forEach(node => node.append('\n'));
-      const text = copy.textContent.trim();
+      const text = plainText(copy);
       if (!text || available <= 0) continue;
-      const excerpt = text.slice(0, available);
+      const sender = message.closest('.adn')?.querySelector('.gD')?.textContent.trim();
+      const excerpt = (sender ? 'From: ' + sender + '\n' + text : text).slice(0, available);
       excerpts.unshift(excerpt);
       available -= excerpt.length + 2;
     }
@@ -88,50 +94,71 @@
     shadow.append(wrapper);
     editor.before(host);
 
-    let run;
     let notice;
-    let preparing = false;
-    const abort = () => {
+    let job;
+    function cancel(message) {
+      if (!job || job.cancelled) return;
+      job.cancelled = true;
+      status.textContent = message;
+      job.run?.cancel();
       notice?.hide();
-      run?.cancel();
+    }
+    const cancelIfChanged = () => {
+      if (job && !job.isCurrent()) cancel('The conversation or reply changed. Your edits were kept.');
     };
-    mounts.set(editor, { host, abort });
+    editor.addEventListener('input', cancelIfChanged);
+    mounts.set(editor, {
+      host,
+      cancelIfChanged,
+      remove() {
+        cancel('Drafting cancelled.');
+        editor.removeEventListener('input', cancelIfChanged);
+        host.remove();
+      }
+    });
 
     star.addEventListener('click', async event => {
       if (!event.isTrusted) return;
-      if (run) { abort(); return; }
-      if (preparing) return;
-      preparing = true;
+      if (job) { cancel('Drafting cancelled.'); return; }
       const snapshot = editor.innerHTML;
       const route = location.href;
-      const stillCurrent = () => enabled && host.isConnected && editor.isConnected &&
+      const pane = readingPane(editor);
+      const isCurrent = () => enabled && host.isConnected && editor.isConnected &&
+        host.parentNode === editor.parentNode && readingPane(editor) === pane &&
         location.href === route && editor.innerHTML === snapshot;
+      const currentJob = { isCurrent, cancelled: false, run: null };
+      job = currentJob;
+      const canContinue = () => !currentJob.cancelled && isCurrent();
+      star.textContent = 'Cancel';
+      status.textContent = 'Preparing your reply…';
       try {
         const [{ startRun }, { createSendNotice }, { ENGINE_LABELS }, { EMAIL_LIMITS }] = await modules();
-        if (!stillCurrent()) return;
-        const pane = readingPane(editor);
+        if (!canContinue()) { cancelIfChanged(); return; }
         const email = pane && extractThread(pane, EMAIL_LIMITS.email);
         if (!email) { status.textContent = 'Open a message and click Reply first.'; return; }
-        const notes = editableRange(editor).range.cloneContents().textContent.trim();
+        const notes = plainText(editableRange(editor).range.cloneContents());
         if (notes.length > EMAIL_LIMITS.notes) { status.textContent = 'Shorten the text in the reply box and try again.'; return; }
         notice ??= createSendNotice({ labelForEngine: name => ENGINE_LABELS[name] });
-        wrapper.append(notice.element);
-        star.textContent = 'Cancel';
-        status.textContent = 'Preparing your reply…';
-        run = startRun({ action: 'draft-gmail', email, notes }, {
-          onStart: engine => { status.textContent = 'Drafting with ' + ENGINE_LABELS[engine] + '…'; },
+        if (!notice.element.isConnected) wrapper.append(notice.element);
+        const sameThread = () => extractThread(pane, EMAIL_LIMITS.email) === email;
+        currentJob.run = startRun({ action: 'draft-gmail', email, notes }, {
+          onStart: engine => {
+            if (canContinue()) status.textContent = 'Drafting with ' + ENGINE_LABELS[engine] + '…';
+          },
           async onApproval(details) {
-            if (!stillCurrent() || extractThread(pane, EMAIL_LIMITS.email) !== email) return false;
+            if (!canContinue() || !sameThread()) return false;
             status.textContent = 'Waiting for approval.';
-            return (await notice.ask(details)) && stillCurrent() && extractThread(pane, EMAIL_LIMITS.email) === email;
+            return (await notice.ask(details)) && canContinue() && sameThread();
           }
         });
-        const reply = await run.promise;
+        const reply = await currentJob.run.promise;
+        if (currentJob.cancelled) return;
         if (!reply) { status.textContent = 'Drafting cancelled.'; return; }
-        if (!stillCurrent() || extractThread(pane, EMAIL_LIMITS.email) !== email) {
-          status.textContent = 'The conversation or reply changed. Your edit was kept.';
+        if (!canContinue() || !sameThread()) {
+          status.textContent = 'The conversation or reply changed. Your edits were kept.';
           return;
         }
+        job = null;
         const { range, protectedBlock } = editableRange(editor);
         editor.focus({ preventScroll: true });
         const selection = window.getSelection();
@@ -145,10 +172,9 @@
           status.textContent = reply.truncated ? 'The draft was cut off. Review it before sending.' : 'Reply drafted. Review it before sending.';
         }
       } catch (error) {
-        status.textContent = error.message;
+        if (!currentJob.cancelled) status.textContent = error.message;
       } finally {
-        run = null;
-        preparing = false;
+        job = null;
         notice?.hide();
         star.textContent = '✦ Draft reply';
       }
@@ -159,18 +185,19 @@
     frame = 0;
     if (!enabled) return;
     for (const [editor, entry] of mounts) {
-      if (!editor.isConnected || !entry.host.isConnected) {
-        entry.abort();
-        entry.host.remove();
+      if (!editor.isConnected || !entry.host.isConnected || entry.host.parentNode !== editor.parentNode ||
+          !editor.matches(editorSelector) || !readingPane(editor) || !isVisible(editor)) {
+        entry.remove();
         mounts.delete(editor);
-      }
+      } else entry.cancelIfChanged();
     }
     for (const editor of document.querySelectorAll(editorSelector)) {
       if (!mounts.has(editor) && readingPane(editor) && isVisible(editor)) mount(editor);
     }
   }
 
-  const observer = new MutationObserver(() => { frame ||= requestAnimationFrame(scan); });
+  function scheduleScan() { frame ||= requestAnimationFrame(scan); }
+  const observer = new MutationObserver(scheduleScan);
   function setEnabled(active) {
     enabled = active;
     if (active) {
@@ -180,17 +207,25 @@
       observer.disconnect();
       cancelAnimationFrame(frame);
       frame = 0;
-      for (const { host, abort } of mounts.values()) { abort(); host.remove(); }
+      for (const entry of mounts.values()) entry.remove();
       mounts.clear();
     }
   }
+  let settingsChanged = false;
   chrome.runtime.onMessage.addListener(message => {
-    if (message?.type === 'OPTIMIZER_SITE_DISABLED' && message.origin === origin) setEnabled(false);
+    if (message?.type !== 'OPTIMIZER_SITE_DISABLED' || message.origin !== origin) return;
+    settingsChanged = true;
+    setEnabled(false);
   });
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area === 'local' && changes.promptcraft_sites) {
+      settingsChanged = true;
       setEnabled((changes.promptcraft_sites.newValue || []).includes(origin));
     }
   });
-  chrome.storage.local.get('promptcraft_sites').then(data => setEnabled((data.promptcraft_sites || []).includes(origin)));
+  window.addEventListener('hashchange', scheduleScan);
+  window.addEventListener('popstate', scheduleScan);
+  chrome.storage.local.get('promptcraft_sites').then(data => {
+    if (!settingsChanged) setEnabled((data.promptcraft_sites || []).includes(origin));
+  }).catch(() => {});
 })();
