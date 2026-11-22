@@ -18,6 +18,7 @@ import { checkBuiltInPromptApiStatus, verifyProvider } from '../shared/optimizer
 import { NANO_SESSION_OPTIONS } from '../shared/nano.js';
 import { scorePrompt, contractTraitIds } from '../shared/scorer.js';
 import { getTargetProfile } from '../shared/target-profiles.js';
+import { GMAIL_ORIGIN } from '../shared/email-draft.js';
 
 document.addEventListener('DOMContentLoaded', async () => {
   hydrateIcons(document);
@@ -1300,10 +1301,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     let enabled = (await getSites()).includes(origin);
+    const control = origin === GMAIL_ORIGIN ? 'Gmail reply star' : 'Optimize button';
     const render = () => {
       el.siteText.textContent = enabled
-        ? `Optimize button is on for ${host}`
-        : `Optimize button is off for ${host}`;
+        ? `${control} is on for ${host}`
+        : `${control} is off for ${host}`;
       el.siteToggle.textContent = enabled ? 'Turn off' : 'Turn on';
       el.siteToggle.hidden = false;
     };

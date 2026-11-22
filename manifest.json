@@ -72,6 +72,7 @@
         "shared/save-sheet.js",
         "shared/run-client.js",
         "shared/assist.js",
+        "shared/email-draft.js",
         "shared/secrets.js",
         "shared/clarify.js",
         "shared/templates.js",

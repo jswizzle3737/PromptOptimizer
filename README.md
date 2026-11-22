@@ -155,6 +155,8 @@ PromptOptimizer guards your sensitive credentials before drafts ever touch a rem
 
 Open **Email replies** from the toolbar popup or Settings. Upload up to five UTF-8 text or Markdown samples and save them with your writing instructions. Paste an incoming email, add any points to include, and review and copy the draft. The workspace saves your writing style locally. If you use an AI provider or gateway, you approve sharing the email and the selected style material before it is sent.
 
+For Gmail, open the toolbar popup while Gmail is active and turn on the **Gmail reply star**. Open an email, click Gmail’s **Reply**, then click **✦ Draft reply** beside the reply box. PromptOptimizer reads the visible conversation and uses your saved writing style. It treats text already in the reply box as notes and inserts the draft when it is ready. You review the result and send it through Gmail.
+
 ## 🤖 Supported AI Engines
 
 | Engine | Type | Privacy | Latency | Key Required? |

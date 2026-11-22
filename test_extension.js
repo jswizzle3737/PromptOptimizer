@@ -176,7 +176,7 @@ function prepareTestExtension() {
   const manifestPath = path.join(dest, 'manifest.json');
   const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
   manifest.content_scripts[0].matches.push('http://127.0.0.1/*');
-  manifest.host_permissions = [...(manifest.host_permissions || []), 'http://127.0.0.1/*', 'http://localhost/*'];
+  manifest.host_permissions = [...(manifest.host_permissions || []), 'http://127.0.0.1/*', 'http://localhost/*', 'https://mail.google.com/*'];
   fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
   return dest;
 }
@@ -2989,6 +2989,71 @@ async function runTests() {
       }
       console.log('✓ Email replies uploaded and restored a writing profile, shared only the selected sample, and generated an editable draft');
       replyClient.close();
+
+      const gmailTab = await (await cdpFetch('/json/new', { method: 'PUT' })).json();
+      const gmail = await createCdpClient(gmailTab.webSocketDebuggerUrl);
+      const gmailUrl = 'https://mail.google.com/mail/u/0/promptoptimizer-test';
+      const fixture = '<main role="main"><div class="adn"><div class="a3s">Can we meet Thursday?</div></div>' +
+        '<div contenteditable="true" role="textbox" g_editable="true"><div>Ask for an agenda.' +
+        '<div class="gmail_signature">Alex</div></div><div class="gmail_quote">Quoted text</div></div></main>';
+      gmail.onEvent(event => {
+        if (event.method === 'Fetch.requestPaused') {
+          const { request, requestId } = event.params;
+          const handling = request.url === gmailUrl
+            ? gmail.send('Fetch.fulfillRequest', {
+                requestId, responseCode: 200, responseHeaders: [{ name: 'Content-Type', value: 'text/html' }],
+                body: Buffer.from(fixture).toString('base64')
+              })
+            : gmail.send('Fetch.failRequest', { requestId, errorReason: 'BlockedByClient' });
+          handling.catch(() => {});
+        }
+      });
+      await gmail.send('Fetch.enable', { patterns: [{ urlPattern: 'https://mail.google.com/*' }] });
+      await gmail.send('Page.navigate', { url: gmailUrl });
+      const optedIn = await optionsClient.send('Runtime.evaluate', {
+        expression: `(async () => {
+          const [tab] = await chrome.tabs.query({url: 'https://mail.google.com/*'});
+          return chrome.runtime.sendMessage({type: 'ENABLE_SITE', origin: 'https://mail.google.com', tabId: tab?.id});
+        })()`, awaitPromise: true, returnByValue: true
+      });
+      if (!optedIn.result.value?.success) throw new Error('Gmail fixture could not be opted in.');
+      const gmailButton = async selector => {
+        const found = await gmail.send('Runtime.evaluate', {
+          expression: `(async () => {
+            for (let i = 0; i < 50; i++) {
+              const button = document.querySelector('[data-promptoptimizer-gmail]')?.shadowRoot?.querySelector(${JSON.stringify(selector)});
+              if (button && button.getClientRects().length) {
+                const box = button.getBoundingClientRect();
+                return {x:box.x + box.width/2, y:box.y + box.height/2, button:'left', clickCount:1};
+              }
+              await new Promise(resolve => setTimeout(resolve, 80));
+            }
+            return null;
+          })()`, awaitPromise: true, returnByValue: true
+        });
+        if (!found.result.value) throw new Error('Gmail control missing: ' + selector);
+        await gmail.send('Input.dispatchMouseEvent', { ...found.result.value, type: 'mousePressed' });
+        await gmail.send('Input.dispatchMouseEvent', { ...found.result.value, type: 'mouseReleased' });
+      };
+      await gmailButton('.gmail-reply__button');
+      await gmailButton('.pc-secret-notice:not([hidden]) [data-act="send"]');
+      const inserted = await gmail.send('Runtime.evaluate', {
+        expression: `(async () => {
+          const editor = document.querySelector('[g_editable]');
+          for (let i = 0; i < 50 && !editor.innerText.includes('Thursday works'); i++) {
+            await new Promise(resolve => setTimeout(resolve, 80));
+          }
+          return {text:editor.innerText, signature:editor.querySelector('.gmail_signature')?.textContent,
+            quote:editor.querySelector('.gmail_quote')?.textContent};
+        })()`, awaitPromise: true, returnByValue: true
+      });
+      const inline = inserted.result.value;
+      if (!inline.text.includes('Thursday works for me. Could you send the agenda?') ||
+          inline.text.includes('Ask for an agenda.') || inline.signature !== 'Alex' || inline.quote !== 'Quoted text') {
+        throw new Error('Gmail draft did not preserve the signature and quoted text: ' + JSON.stringify(inline));
+      }
+      console.log('✓ Gmail reply star used the saved style, requested approval, and inserted a draft with the signature and quote intact');
+      gmail.close();
       optionsClient.close();
       otherClient.close();
     } finally {

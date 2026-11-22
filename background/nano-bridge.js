@@ -22,8 +22,8 @@ async function ensureOffscreen() {
   // Two requests at once must not both create it ("Only a single offscreen document").
   creating ??= chrome.offscreen.createDocument({
     url: OFFSCREEN_URL,
-    reasons: ['DOM_PARSER'],
-    justification: 'Runs Chrome\'s built-in on-device language model (Prompt API), which is not available in service workers.'
+    reasons: ['DOM_PARSER', 'LOCAL_STORAGE'],
+    justification: 'Runs the on-device model and reads the writing style saved in the extension workspace.'
   }).finally(() => { creating = null; });
   await creating;
 }
@@ -49,6 +49,7 @@ async function request(message, { signal, onToken } = {}) {
     port.onMessage.addListener(msg => {
       if (msg.type === 'token') onToken?.(msg.delta);
       else if (msg.type === 'status') finish(resolve, msg.status);
+      else if (msg.type === 'email-style') finish(resolve, msg.profile);
       else if (msg.type === 'done') finish(resolve, { text: msg.text, truncated: Boolean(msg.truncated) });
       else if (msg.type === 'error') finish(reject, new Error(msg.message));
     });
@@ -56,6 +57,10 @@ async function request(message, { signal, onToken } = {}) {
       finish(reject, new Error('The on-device model host closed unexpectedly.')));
     port.postMessage(message);
   });
+}
+
+export function readSavedEmailStyle(signal) {
+  return request({ type: 'email-style' }, { signal });
 }
 
 /** The backend shape optimizer-engine's setNanoBackend expects. */

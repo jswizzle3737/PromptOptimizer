@@ -354,6 +354,23 @@ test('a failed history write returns a usable rewrite and a history warning', as
   }
 });
 
+test('Gmail drafting requires an opted-in top-level Gmail page', async () => {
+  const gmail = 'https://mail.google.com/mail/u/0/';
+  const cases = [
+    { frameId: 0, url: gmail, tab: { url: gmail } },
+    { frameId: 1, url: gmail, tab: { url: gmail }, optedIn: true },
+    { frameId: 0, url: 'https://example.com/', tab: { url: gmail }, optedIn: true }
+  ];
+  for (const { optedIn, ...sender } of cases) {
+    stub.promptcraft_sites = optedIn ? ['https://mail.google.com'] : [];
+    const port = fakePort('optimize', sender);
+    await fire('connect', port);
+    await port.send({ type: 'start', payload: { action: 'draft-gmail', email: 'Can we meet Thursday?' } });
+    assert.equal(port.posted.at(-1).type, 'error');
+    assert.match(port.posted.at(-1).error, /enable the reply star/i);
+  }
+});
+
 test('writes from separate extension surfaces retain both settings changes and library entries', async () => {
   const write = (operation, payload) => send({ type: 'WRITE_USER_DATA', operation, payload });
   const results = await Promise.all([
