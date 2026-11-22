@@ -12,9 +12,13 @@ import { startRun } from '../shared/run-client.js';
 import { secretWarning } from '../shared/secrets.js';
 import { withAnswers } from '../shared/clarify.js';
 import {
-  createResultActions, createClarifySheet, createSecretNotice, createLibraryPicker
+  createResultActions, createClarifySheet, createSecretNotice, createLibraryPicker,
+  createUndoStack, bindEditableResult
 } from '../shared/assist.js';
 import { checkBuiltInPromptApiStatus, verifyProvider } from '../shared/optimizer-engine.js';
+import { NANO_SESSION_OPTIONS } from '../shared/nano.js';
+import { scorePrompt, contractTraitIds } from '../shared/scorer.js';
+import { getTargetProfile } from '../shared/target-profiles.js';
 
 document.addEventListener('DOMContentLoaded', async () => {
   hydrateIcons(document);
@@ -28,8 +32,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     themeSlot: document.getElementById('theme-toggle-slot'),
     engineSlot: document.getElementById('engine-slot'),
     rawPrompt: document.getElementById('raw-prompt'),
+    targetBadge: document.getElementById('target-badge'),
+    clearDraftBtn: document.getElementById('clear-draft-btn'),
     charCounter: document.getElementById('char-counter'),
     optimizeBtn: document.getElementById('optimize-btn'),
+    loadingState: document.getElementById('loading-state'),
+    loadingLabel: document.getElementById('loading-label'),
     resultText: document.getElementById('result-text'),
     resultPlaceholder: document.getElementById('result-placeholder'),
     techChips: document.getElementById('tech-chips'),
@@ -65,6 +73,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     resultActionsSlot: document.getElementById('result-actions-slot'),
     setupCard: document.getElementById('setup-card'),
     setupText: document.getElementById('setup-text'),
+    setupCheckBtn: document.getElementById('setup-check-btn'),
     setupDownloadBtn: document.getElementById('setup-download-btn'),
     setupProviderSlot: document.getElementById('setup-provider-slot'),
     setupKey: document.getElementById('setup-key'),
@@ -77,6 +86,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     framework: 'smart-expand',
     engine: DEFAULT_ENGINE,
     theme: 'dark',
+    host: null,
     latest: '',
     /* What the result on screen came from, so a saved prompt records it. */
     original: '',
@@ -91,6 +101,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     /* Draft the user chose to send despite the credential warning. */
     secretAllowedFor: ''
   };
+
+  const SESSION_KEY = 'promptcraft_popup_session';
+  const undoStack = createUndoStack(25);
 
   /* ---------------------------------------------------------------- Toast */
   let toastTimer;
@@ -112,6 +125,43 @@ document.addEventListener('DOMContentLoaded', async () => {
       (tone === 'success' ? ' pc-status-dot--success'
         : tone === 'warning' ? ' pc-status-dot--warning'
           : tone === 'danger' ? ' pc-status-dot--danger' : '');
+  }
+
+  function updateClearDraftVisibility() {
+    el.clearDraftBtn.hidden = !(el.rawPrompt.value || state.latest || undoStack.canUndo());
+  }
+
+  let sessionSaveTimer = null;
+  async function saveSession() {
+    clearTimeout(sessionSaveTimer);
+    sessionSaveTimer = null;
+    if (!chrome.storage?.session) return;
+    try {
+      if (!el.rawPrompt.value && !state.latest && !undoStack.canUndo()) {
+        await chrome.storage.session.remove(SESSION_KEY);
+        return;
+      }
+      await chrome.storage.session.set({
+        [SESSION_KEY]: {
+          rawPrompt: el.rawPrompt.value,
+          framework: state.framework,
+          latest: state.latest,
+          original: state.original,
+          resultEngine: state.resultEngine,
+          resultFramework: state.resultFramework,
+          lastData: state.lastData,
+          variants: state.variants,
+          scoreBefore: scoreBefore(),
+          undoStack: undoStack.toJSON()
+        }
+      });
+    } catch {}
+  }
+
+  function scheduleSessionSave() {
+    updateClearDraftVisibility();
+    clearTimeout(sessionSaveTimer);
+    sessionSaveTimer = setTimeout(() => { saveSession(); }, 180);
   }
 
   /* -------------------------------------------------------------- Theming */
@@ -183,12 +233,14 @@ document.addEventListener('DOMContentLoaded', async () => {
   function renderFrameworkTabs() {
     el.frameworkTabs.innerHTML = '';
     frameworks.forEach(fw => {
+      const selected = fw.id === state.framework;
       const tab = document.createElement('button');
       tab.type = 'button';
       tab.className = 'pc-segmented__item';
       tab.setAttribute('role', 'tab');
       tab.dataset.framework = fw.id;
-      tab.setAttribute('aria-selected', String(fw.id === state.framework));
+      tab.setAttribute('aria-selected', String(selected));
+      tab.setAttribute('tabindex', selected ? '0' : '-1');
       tab.title = fw.tagline || fw.name;
       tab.innerHTML =
         `<span class="pc-segmented__icon">${icon(fw.icon, { size: 13 })}</span>` +
@@ -198,23 +250,93 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
   renderFrameworkTabs();
 
+  function selectFrameworkTab(id, { focus = false } = {}) {
+    const tabs = [...el.frameworkTabs.querySelectorAll('.pc-segmented__item')];
+    const target = tabs.find(t => t.dataset.framework === id);
+    if (!target) return;
+    tabs.forEach(t => {
+      const selected = t === target;
+      t.setAttribute('aria-selected', String(selected));
+      t.setAttribute('tabindex', selected ? '0' : '-1');
+    });
+    state.framework = id;
+    if (focus) target.focus();
+    scheduleSessionSave();
+    if (!state.busy && state.latest && state.resultFramework && state.framework !== state.resultFramework) {
+      setStatus(`Switched to ${target.textContent.trim()} — click Optimize to rewrite`, 'neutral');
+    }
+  }
+
   el.frameworkTabs.addEventListener('click', e => {
     const tab = e.target.closest('.pc-segmented__item');
-    if (!tab) return;
-    el.frameworkTabs.querySelectorAll('.pc-segmented__item')
-      .forEach(t => t.setAttribute('aria-selected', 'false'));
-    tab.setAttribute('aria-selected', 'true');
-    state.framework = tab.dataset.framework;
+    if (tab) selectFrameworkTab(tab.dataset.framework);
+  });
+
+  el.frameworkTabs.addEventListener('keydown', e => {
+    const tabs = [...el.frameworkTabs.querySelectorAll('.pc-segmented__item')];
+    if (!tabs.length) return;
+    const idx = tabs.indexOf(document.activeElement);
+    if (idx === -1) return;
+    let nextIdx = -1;
+    if (e.key === 'ArrowRight') nextIdx = (idx + 1) % tabs.length;
+    else if (e.key === 'ArrowLeft') nextIdx = (idx - 1 + tabs.length) % tabs.length;
+    else if (e.key === 'Home') nextIdx = 0;
+    else if (e.key === 'End') nextIdx = tabs.length - 1;
+    if (nextIdx === -1) return;
+    e.preventDefault();
+    selectFrameworkTab(tabs[nextIdx].dataset.framework, { focus: true });
   });
 
   /* ------------------------------------------------------- Input feedback */
   el.rawPrompt.addEventListener('input', () => {
     el.charCounter.textContent = String(el.rawPrompt.value.length);
+    scheduleSessionSave();
   });
 
+  async function clearWorkspace() {
+    if (state.busy) return;
+    el.rawPrompt.value = '';
+    el.charCounter.textContent = '0';
+    state.latest = '';
+    state.original = '';
+    state.resultEngine = '';
+    state.resultFramework = '';
+    state.lastData = null;
+    state.variants = [];
+    state.secretAllowedFor = '';
+    undoStack.clear();
+    editableCtrl.setEditable(false);
+    el.resultText.textContent = '';
+    el.resultText.hidden = true;
+    el.resultPlaceholder.hidden = false;
+    el.loadingState.hidden = true;
+    el.degradedNotice.hidden = true;
+    el.engineBadge.hidden = true;
+    el.engineBadge.title = '';
+    el.qualityChip.hidden = true;
+    el.variantChips.hidden = true;
+    el.techChips.hidden = true;
+    resultActions.clearCustomInput();
+    resultActions.update(actionState());
+    secretNotice.hide();
+    saveSheet.close();
+    clarifySheet.close();
+    updateClearDraftVisibility();
+    setStatus('Ready', 'neutral');
+    try { await chrome.storage.session?.remove?.(SESSION_KEY); } catch {}
+    el.rawPrompt.focus();
+  }
+  el.clearDraftBtn.addEventListener('click', clearWorkspace);
+
   /* --------------------------------------------------------------- Shell */
-  el.optionsBtn.addEventListener('click', () => chrome.runtime.openOptionsPage());
-  el.degradedSettingsBtn.addEventListener('click', () => chrome.runtime.openOptionsPage());
+  el.optionsBtn.addEventListener('click', async () => {
+    await saveSession();
+    chrome.runtime.openOptionsPage();
+  });
+  el.degradedSettingsBtn.addEventListener('click', async () => {
+    await saveSession();
+    chrome.runtime.openOptionsPage();
+  });
 
   /* ------------------------------------------------------------- History */
   async function renderHistory() {
@@ -251,6 +373,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         <div class="pc-history__preview">${escapeHtml(item.original || '')}</div>
       `;
       const restore = () => {
+        pushUndoSnapshot();
+        stopWaitTimer();
         el.rawPrompt.value = item.original || '';
         el.charCounter.textContent = String(el.rawPrompt.value.length);
         state.latest = item.optimized || '';
@@ -258,12 +382,33 @@ document.addEventListener('DOMContentLoaded', async () => {
         state.resultEngine = item.engine || '';
         state.resultFramework = item.framework || '';
         state.lastData = null;
+        state.variants = [];
+        el.degradedNotice.hidden = true;
+        el.engineBadge.hidden = !state.resultEngine;
+        if (state.resultEngine) {
+          el.engineBadge.textContent = ENGINE_LABELS[state.resultEngine] || state.resultEngine;
+          el.engineBadge.className = 'pc-badge pc-badge--mono ' + (item.degraded ? 'pc-badge--warning' : 'pc-badge--accent');
+          el.engineBadge.title = '';
+        } else {
+          el.engineBadge.title = '';
+        }
+        el.variantChips.hidden = true;
+        el.techChips.hidden = true;
+        if (state.latest) {
+          const rule = scorePrompt(state.latest, { traitIds: contractTraitIds(state.resultFramework || state.framework) });
+          renderQualityChip({ before: null, after: rule.score, missed: rule.missed, method: 'rules' }, state.original);
+        } else {
+          el.qualityChip.hidden = true;
+        }
         showResult(state.latest);
+        editableCtrl.setEditable(Boolean(state.latest && !state.busy));
         resultActions.update(actionState());
         if (item.engine) {
           engineSelect.setValue(item.engine, { silent: true });
           state.engine = item.engine;
         }
+        updateClearDraftVisibility();
+        scheduleSessionSave();
         setHistoryOpen(false);
         el.rawPrompt.focus();
       };
@@ -277,6 +422,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   function showResult(text) {
     if (!text) return;
+    stopWaitTimer();
     el.resultPlaceholder.hidden = true;
     el.resultText.hidden = false;
     el.resultText.textContent = text;
@@ -320,6 +466,26 @@ document.addEventListener('DOMContentLoaded', async () => {
   /* ------------------------------------------------------------ Optimize */
   /* While a request runs, the Optimize button becomes Cancel. */
   let currentRun = null;
+  let waitTimer = null;
+
+  function stopWaitTimer() {
+    clearInterval(waitTimer);
+    waitTimer = null;
+    el.loadingState.hidden = true;
+  }
+
+  function startWaitTimer(label, tone = 'neutral') {
+    stopWaitTimer();
+    let sec = 0;
+    el.loadingLabel.textContent = label;
+    el.loadingState.hidden = false;
+    waitTimer = setInterval(() => {
+      sec += 1;
+      const text = `${label} (${sec}s)`;
+      el.loadingLabel.textContent = text;
+      if (state.busy) setStatus(text, tone);
+    }, 1000);
+  }
 
   function setBusy(busy) {
     state.busy = busy;
@@ -328,6 +494,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       : `${icon('wand', { size: 14 })}<span>Optimize</span>`;
     el.optimizeBtn.title = busy ? 'Stop this request' : 'Optimize prompt (Ctrl+Enter)';
     el.askFirstBtn.disabled = busy;
+    editableCtrl.setEditable(Boolean(state.latest && !busy));
     resultActions.update({ ...actionState(), busy });
   }
 
@@ -383,6 +550,99 @@ document.addEventListener('DOMContentLoaded', async () => {
     el.qualityChip.hidden = false;
   }
 
+  /* The "before" half of the quality chip; kept across variant switches and manual edits. */
+  function scoreBefore() {
+    const m = el.qualityChip.textContent.match(/Quality (\d+)/);
+    return m ? parseInt(m[1], 10) : null;
+  }
+
+  function currentSnapshot() {
+    if (!state.latest) return null;
+    return {
+      text: state.latest,
+      original: state.original,
+      engine: state.resultEngine,
+      framework: state.resultFramework,
+      data: state.lastData,
+      variants: state.variants.slice(),
+      scoreBefore: scoreBefore()
+    };
+  }
+
+  function pushUndoSnapshot(snap = currentSnapshot()) {
+    if (snap && undoStack.push(snap)) {
+      updateClearDraftVisibility();
+      resultActions.update({ ...actionState(), busy: state.busy });
+    }
+  }
+
+  function restoreSnapshot(snap, { statusText = 'Reverted change' } = {}) {
+    if (!snap) return;
+    stopWaitTimer();
+    state.lastData = snap.data || null;
+    state.latest = snap.text || '';
+    state.original = snap.original || '';
+    state.resultEngine = snap.engine || '';
+    state.resultFramework = snap.framework || state.framework;
+    state.variants = Array.isArray(snap.variants) ? snap.variants.slice() : [];
+    el.resultText.textContent = state.latest;
+    el.resultText.hidden = !state.latest;
+    el.resultPlaceholder.hidden = Boolean(state.latest);
+    el.degradedNotice.hidden = !(state.lastData?.degraded);
+    if (state.resultEngine && state.lastData) {
+      el.engineBadge.textContent = ENGINE_LABELS[state.resultEngine] || state.resultEngine;
+      el.engineBadge.className = 'pc-badge pc-badge--mono ' +
+        (state.lastData.degraded ? 'pc-badge--warning' : 'pc-badge--accent');
+      if (state.lastData.fallbackReason) {
+        const requested = ENGINE_LABELS[state.lastData.requestedEngine] || state.lastData.requestedEngine;
+        const sameProvider = state.lastData.engine === state.lastData.requestedEngine;
+        el.engineBadge.title = sameProvider && state.lastData.requestedModel
+          ? `${requested} (${state.lastData.requestedModel}) failed: ${state.lastData.fallbackReason}`
+          : `${requested} failed: ${state.lastData.fallbackReason}`;
+      } else {
+        el.engineBadge.title = state.lastData.model
+          ? `${ENGINE_LABELS[state.resultEngine] || state.resultEngine} (${state.lastData.model})`
+          : '';
+      }
+      el.engineBadge.hidden = false;
+    } else {
+      el.engineBadge.title = '';
+      el.engineBadge.hidden = true;
+    }
+    renderVariantChips();
+    renderTechChips(state.lastData?.techniques);
+    if (state.lastData?.score) renderQualityChip(state.lastData.score, state.original);
+    else if (state.latest) {
+      const rule = scorePrompt(state.latest, { traitIds: contractTraitIds(state.resultFramework || state.framework) });
+      renderQualityChip({ before: snap.scoreBefore ?? null, after: rule.score, missed: rule.missed, method: 'rules' }, state.original);
+    } else {
+      el.qualityChip.hidden = true;
+    }
+    editableCtrl.setEditable(Boolean(state.latest && !state.busy));
+    updateClearDraftVisibility();
+    resultActions.update({ ...actionState(), busy: state.busy });
+    if (statusText) setStatus(statusText, 'neutral');
+    scheduleSessionSave();
+  }
+
+  const editableCtrl = bindEditableResult({
+    element: el.resultText,
+    onSnapshot: () => pushUndoSnapshot(),
+    onEdit: editedText => {
+      state.latest = editedText;
+      if (state.lastData) state.lastData = { ...state.lastData, optimized: editedText };
+      const rule = scorePrompt(editedText, {
+        traitIds: contractTraitIds(state.resultFramework || state.framework)
+      });
+      renderQualityChip({ before: scoreBefore(), after: rule.score, missed: rule.missed, method: 'rules' }, state.original);
+      renderVariantChips();
+      updateClearDraftVisibility();
+      resultActions.update({ ...actionState(), busy: state.busy });
+      setStatus('Edited', 'neutral');
+      scheduleSessionSave();
+    }
+  });
+
   /* Variant chips: clickable alternatives ranked by score. Clicking one swaps
      the result on screen (and everything that follows from it: copy, save,
      insert), keeping the chosen text and its own score in sync. */
@@ -402,39 +662,49 @@ document.addEventListener('DOMContentLoaded', async () => {
       btn.title = `Use this variant (quality ${variant.score ?? 'n/a'}/100)`;
       btn.setAttribute('aria-pressed', String(active));
       btn.addEventListener('click', () => {
+        if (variant.text === state.latest) return;
+        pushUndoSnapshot();
         state.latest = variant.text;
+        if (state.lastData) state.lastData = { ...state.lastData, optimized: state.latest };
         el.resultText.textContent = variant.text;
         renderVariantChips();
         renderQualityChip({ before: scoreBefore(), after: variant.score, method: 'rules' }, state.original);
+        resultActions.update({ ...actionState(), busy: state.busy });
+        scheduleSessionSave();
       });
       el.variantChips.appendChild(btn);
     });
     el.variantChips.hidden = false;
   }
 
-  /* The "before" half of the quality chip; kept across variant switches. */
-  function scoreBefore() {
-    const m = el.qualityChip.textContent.match(/Quality (\d+)/);
-    return m ? parseInt(m[1], 10) : null;
-  }
-
-  /* Refine / Continue under the result. Only for model output: a template of
-     a rewrite is not a refinement. */
+  /* Refine / Continue / Undo under the result. Only model output supports
+     refinement; undo restores the previous snapshot whenever available. */
   function actionState() {
     const data = state.lastData;
+    const hasUndo = undoStack.canUndo();
     return {
-      visible: Boolean(state.latest && data),
+      visible: Boolean(state.latest && (data || hasUndo)),
       truncated: Boolean(data?.truncated),
-      canRefine: Boolean(data && data.engine !== 'offline')
+      canRefine: Boolean(state.latest && data && data.engine !== 'offline'),
+      canUndo: hasUndo
     };
   }
 
   const resultActions = createResultActions({
-    onRefine: kind => runRequest({ action: 'refine', kind, previous: state.latest, text: state.original }),
-    onContinue: () => runRequest(
-      { action: 'refine', kind: 'continue', previous: state.latest, text: state.original },
+    onRefine: async kind => runRequest({
+      action: 'refine', kind, previous: state.latest, text: state.original, host: state.host || await activeTabHost()
+    }),
+    onCustomRefine: async instruction => runRequest({
+      action: 'refine', kind: 'custom', instruction, previous: state.latest, text: state.original, host: state.host || await activeTabHost()
+    }),
+    onContinue: async () => runRequest(
+      { action: 'refine', kind: 'continue', previous: state.latest, text: state.original, host: state.host || await activeTabHost() },
       { base: state.latest }
-    )
+    ),
+    onUndo: () => {
+      const prev = undoStack.pop();
+      if (prev) restoreSnapshot(prev);
+    }
   });
   el.resultActionsSlot.appendChild(resultActions.element);
 
@@ -448,7 +718,34 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
+  async function activeTabHost() {
+    const tab = await activeTab();
+    if (!tab?.url) return null;
+    try {
+      const u = new URL(tab.url);
+      return u.protocol === 'https:' || u.protocol === 'http:' ? u.hostname : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async function refreshTargetBadge() {
+    const host = await activeTabHost();
+    state.host = host;
+    const profile = getTargetProfile(host);
+    if (profile) {
+      el.targetBadge.textContent = `For ${profile.name}`;
+      el.targetBadge.title = `Recognized ${profile.name} (${host}) — prompts are tailored for this AI`;
+      el.targetBadge.hidden = false;
+    } else {
+      el.targetBadge.hidden = true;
+      el.targetBadge.textContent = '';
+      el.targetBadge.title = '';
+    }
+  }
+
   function applyResult(data, original) {
+    stopWaitTimer();
     state.lastData = data;
     state.latest = data.optimized;
     state.original = original;
@@ -466,27 +763,54 @@ document.addEventListener('DOMContentLoaded', async () => {
     renderTechChips(data.techniques);
 
     if (data.degraded) {
+      el.engineBadge.title = '';
       showDegraded(data);
       setStatus('Offline fallback', 'warning');
       toast('Fell back to the offline template', 'danger');
       refreshSetupCard();
-    } else if (data.fallbackReason) {
-      /* Another configured provider answered for the chosen one. */
-      const requested = ENGINE_LABELS[data.requestedEngine] || data.requestedEngine;
-      const used = ENGINE_LABELS[data.engine] || data.engine;
-      el.engineBadge.title = `${requested} failed: ${data.fallbackReason}`;
-      setStatus(`Used ${used}`, 'warning');
-      toast(`${requested} unavailable, used ${used}`, 'neutral');
-    } else if (data.truncated) {
-      el.engineBadge.title = '';
-      setStatus('Cut off', 'warning');
-      toast('The output was cut off. Press Continue to finish it.', 'neutral');
     } else {
-      el.engineBadge.title = '';
-      setStatus('Done', 'success');
-      toast(data.refinement ? 'Prompt refined' : 'Prompt optimized', 'success');
+      if (data.engine === 'nano') {
+        nanoStatus = { available: true, status: 'available' };
+        el.setupCard.hidden = true;
+      }
+      if (data.fallbackReason) {
+        /* Another configured provider or fallback model answered for the chosen one. */
+        const requested = ENGINE_LABELS[data.requestedEngine] || data.requestedEngine;
+        const used = ENGINE_LABELS[data.engine] || data.engine;
+        const sameProvider = data.engine === data.requestedEngine;
+        if (sameProvider) {
+          el.engineBadge.title = data.requestedModel && data.model
+            ? `${requested} (${data.requestedModel}) failed: ${data.fallbackReason}`
+            : `${requested} failed: ${data.fallbackReason}`;
+          setStatus(data.model ? `Used ${data.model}` : `Used ${used}`, 'warning');
+          toast(
+            data.model
+              ? `${data.requestedModel || requested} failed, used ${data.model}`
+              : `${requested} fallback used`,
+            'neutral'
+          );
+        } else {
+          el.engineBadge.title = `${requested} failed: ${data.fallbackReason}`;
+          setStatus(`Used ${used}`, 'warning');
+          toast(
+            `${requested} unavailable, used ${used}${data.model ? ` (${data.model})` : ''}`,
+            'neutral'
+          );
+        }
+      } else if (data.truncated) {
+        el.engineBadge.title = data.model ? `${ENGINE_LABELS[data.engine] || data.engine} (${data.model})` : '';
+        setStatus('Cut off', 'warning');
+        toast('The output was cut off. Press Continue to finish it.', 'neutral');
+      } else {
+        el.engineBadge.title = data.model ? `${ENGINE_LABELS[data.engine] || data.engine} (${data.model})` : '';
+        setStatus('Done', 'success');
+        toast(data.refinement ? 'Prompt refined' : 'Prompt optimized', 'success');
+      }
     }
+    editableCtrl.setEditable(Boolean(state.latest && !state.busy));
+    updateClearDraftVisibility();
     resultActions.update(actionState());
+    saveSession();
   }
 
   /**
@@ -496,21 +820,34 @@ document.addEventListener('DOMContentLoaded', async () => {
   async function runRequest(payload, { base = '' } = {}) {
     if (state.busy) return;
     const isOptimize = !payload.action || payload.action === 'optimize';
-    const previous = { latest: state.latest, data: state.lastData };
+    const preRunSnapshot = currentSnapshot();
     setBusy(true);
     saveSheet.close();
     clarifySheet.close();
     secretNotice.hide();
-    setStatus(isOptimize ? 'Optimizing…' : 'Refining…', 'neutral');
+    const waitLabel = isOptimize && state.variantCount > 1
+      ? `Generating ${state.variantCount} variants…`
+      : (isOptimize ? 'Optimizing…' : 'Refining…');
+    setStatus(waitLabel, 'neutral');
     el.degradedNotice.hidden = true;
     el.techChips.hidden = true;
     el.qualityChip.hidden = true;
     el.variantChips.hidden = true;
     resultActions.update({ visible: false });
-    if (isOptimize) state.variants = [];
+    if (isOptimize) {
+      state.variants = [];
+      if (!base) {
+        el.resultText.hidden = true;
+        el.resultPlaceholder.hidden = true;
+        startWaitTimer(waitLabel);
+      }
+    } else if (!base) {
+      startWaitTimer(waitLabel);
+    }
 
     let streamed = base;
     const paint = text => {
+      stopWaitTimer();
       el.resultPlaceholder.hidden = true;
       el.resultText.hidden = false;
       el.resultText.textContent = text;
@@ -519,30 +856,53 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (base) paint(base);
 
     currentRun = startRun({ ...payload, engine: state.engine, frameworkId: state.framework }, {
-      onStart: engine => {
+      onStart: (engine, model) => {
         streamed = base;
-        setStatus(`${ENGINE_LABELS[engine] || engine}…`, 'neutral');
-        if (base) paint(base);
+        const label = ENGINE_LABELS[engine] || engine;
+        const withModel = model ? `${label} (${model})` : label;
+        const engineWait = isOptimize && state.variantCount > 1
+          ? `${withModel} (${state.variantCount} variants)…`
+          : `${withModel}…`;
+        if (base) {
+          setStatus(engineWait, 'neutral');
+          paint(base);
+        } else {
+          setStatus(engineWait, 'neutral');
+          startWaitTimer(engineWait);
+        }
       },
       onToken: delta => {
         streamed += delta;
         paint(streamed);
+      },
+      onStatus: info => {
+        if (!state.busy) return;
+        const waitSec = info?.delayMs ? `${Math.max(1, Math.round(info.delayMs / 1000))}s` : '';
+        const why = info?.status === 429 ? 'Rate limited (429)' : (info?.reason || 'Retrying');
+        const msg = `${why}${waitSec ? `, retrying in ${waitSec}…` : ', retrying…'}`;
+        setStatus(msg, 'warning');
+        if (!streamed) startWaitTimer(msg, 'warning');
       }
     });
 
     try {
       const data = await currentRun.promise;
       if (!data) {
-        // Cancelled: put back whatever was on screen before.
-        state.latest = previous.latest;
-        state.lastData = previous.data;
-        if (state.latest) showResult(state.latest);
-        else { el.resultText.hidden = true; el.resultPlaceholder.hidden = false; }
-        setStatus('Cancelled', 'neutral');
+        stopWaitTimer();
+        if (preRunSnapshot) {
+          restoreSnapshot(preRunSnapshot, { statusText: 'Cancelled' });
+        } else {
+          el.resultText.hidden = true;
+          el.resultPlaceholder.hidden = false;
+          setStatus('Cancelled', 'neutral');
+        }
         return;
       }
+      if (preRunSnapshot) pushUndoSnapshot(preRunSnapshot);
+      if (payload.kind === 'custom') resultActions.clearCustomInput();
       applyResult(data, isOptimize ? payload.text : state.original);
     } catch (err) {
+      stopWaitTimer();
       if (isOptimize) {
         el.resultText.hidden = true;
         el.resultPlaceholder.hidden = false;
@@ -550,13 +910,14 @@ document.addEventListener('DOMContentLoaded', async () => {
           <span class="pc-empty__icon">${icon('alert', { size: 16 })}</span>
           <span class="pc-empty__title">Optimization failed</span>
           <span class="pc-empty__desc">${escapeHtml(err.message)}</span>`;
-      } else if (state.latest) {
+      } else if (preRunSnapshot) {
         // A failed refinement leaves the result it was refining untouched.
-        showResult(previous.latest);
+        restoreSnapshot(preRunSnapshot, { statusText: '' });
       }
       setStatus('Failed', 'danger');
       toast(err.message, 'danger');
     } finally {
+      stopWaitTimer();
       el.resultText.classList.remove('is-streaming');
       currentRun = null;
       setBusy(false);
@@ -588,9 +949,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       return;
     }
     if (await blockedBySecret(text)) return;
-    const tab = await activeTab();
-    let host = null;
-    try { host = tab?.url ? new URL(tab.url).hostname : null; } catch { /* untargeted */ }
+    const host = (await activeTabHost()) || state.host || null;
+    state.host = host;
+    await refreshTargetBadge();
     await runRequest({
       action: 'optimize',
       text,
@@ -676,6 +1037,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     },
     onUse: (text, entry) => {
       setLibraryOpen(false);
+      pushUndoSnapshot();
+      stopWaitTimer();
       state.lastData = null;
       state.latest = text;
       state.original = entry.original || '';
@@ -688,9 +1051,12 @@ document.addEventListener('DOMContentLoaded', async () => {
       el.variantChips.hidden = true;
       el.techChips.hidden = true;
       showResult(text);
+      editableCtrl.setEditable(Boolean(state.latest && !state.busy));
+      updateClearDraftVisibility();
       resultActions.update(actionState());
       setStatus(`Loaded "${entry.title}"`, 'neutral');
       toast('Saved prompt ready to copy', 'success');
+      scheduleSessionSave();
     }
   });
   el.librarySlot.appendChild(libraryPicker.element);
@@ -723,20 +1089,66 @@ document.addEventListener('DOMContentLoaded', async () => {
   el.setupProviderSlot.appendChild(setupProvider.element);
 
   let nanoStatus = null;
-  async function refreshSetupCard() {
+  async function refreshSetupCard({ probe = false } = {}) {
     const s = await getSettings();
     const hasKey = Object.keys(KEY_LINKS).some(id => String(s[`${id}ApiKey`] || '').trim());
-    nanoStatus ??= await checkBuiltInPromptApiStatus();
-    const engineReady = s.preferredEngine === 'offline' || hasKey ||
-      (s.preferredEngine === 'nano' && nanoStatus.available);
-    const show = !engineReady && !s.setupDismissed;
-    el.setupCard.hidden = !show;
-    if (!show) return;
+    const omniReady = Boolean(s.omnirouteEnabled || String(s.omnirouteApiKey || '').trim());
+    if (s.preferredEngine === 'offline' || hasKey || omniReady || s.setupDismissed) {
+      el.setupCard.hidden = true;
+      return;
+    }
+
+    if (typeof globalThis.LanguageModel === 'undefined') {
+      nanoStatus = { available: false, status: 'unsupported' };
+    } else if (probe) {
+      nanoStatus = await checkBuiltInPromptApiStatus();
+    }
+
+    if (nanoStatus?.available) {
+      el.setupCard.hidden = true;
+      await saveSettings({ setupDismissed: true });
+      return;
+    }
+
+    el.setupCard.hidden = false;
+    if (!nanoStatus) {
+      el.setupCheckBtn.hidden = false;
+      el.setupDownloadBtn.hidden = true;
+      el.setupText.textContent =
+        'Check whether Chrome\'s on-device model is ready, add an API key (OpenRouter has free models), or configure OmniRoute in Options.';
+      return;
+    }
+
+    el.setupCheckBtn.hidden = true;
     el.setupDownloadBtn.hidden = nanoStatus.status !== 'downloadable';
-    el.setupText.textContent = nanoStatus.status === 'downloadable'
-      ? 'Chrome can run a private on-device model, but it is not downloaded yet. Download it once, or add a key from any provider. Without either, rewrites use a basic template.'
-      : 'Chrome\'s on-device model is not available in this browser, so rewrites use a basic template. Add a key from any provider to get real AI rewrites. OpenRouter has free models.';
+    if (nanoStatus.status === 'downloadable') {
+      el.setupText.textContent =
+        'Chrome can run a private on-device model, but it is not downloaded yet. Download it once, add an API key, or configure OmniRoute in Options.';
+    } else if (nanoStatus.status === 'downloading') {
+      el.setupText.textContent =
+        'Chrome\'s on-device model is currently downloading. Check chrome://components, add an API key, or configure OmniRoute in Options.';
+    } else if (nanoStatus.status === 'error' && /feature flag|gating model execution/i.test(nanoStatus.error || '')) {
+      el.setupText.textContent =
+        'Chrome\'s on-device model execution flag is disabled. Enable the flags in Options, add an API key below, or configure OmniRoute.';
+    } else {
+      el.setupText.textContent =
+        'Chrome\'s on-device model is not available in this browser, so rewrites use a basic template. Add a key from any provider (OpenRouter has free models) or configure OmniRoute in Options.';
+    }
   }
+
+  el.setupCheckBtn.addEventListener('click', async () => {
+    el.setupCheckBtn.disabled = true;
+    el.setupCheckBtn.lastElementChild.textContent = 'Checking…';
+    try {
+      await refreshSetupCard({ probe: true });
+      if (nanoStatus?.available) {
+        toast('On-device Gemini Nano is ready', 'success');
+      }
+    } finally {
+      el.setupCheckBtn.disabled = false;
+      el.setupCheckBtn.lastElementChild.textContent = 'Check Chrome Nano';
+    }
+  });
 
   el.setupSaveBtn.addEventListener('click', async () => {
     const provider = setupProvider.getValue();
@@ -772,26 +1184,47 @@ document.addEventListener('DOMContentLoaded', async () => {
   /* Downloading Nano needs a user gesture: this click. */
   el.setupDownloadBtn.addEventListener('click', async () => {
     const LM = globalThis.LanguageModel;
-    if (!LM) return;
+    if (!LM || typeof LM.create !== 'function') return;
     el.setupDownloadBtn.disabled = true;
+    setStatus('Downloading on-device model…', 'neutral');
     try {
       const session = await LM.create({
+        ...NANO_SESSION_OPTIONS,
         monitor(m) {
-          m.addEventListener('downloadprogress', e => {
-            el.setupDownloadBtn.lastElementChild.textContent = `Downloading… ${Math.round((e.loaded || 0) * 100)}%`;
+          m.addEventListener('downloadprogress', ev => {
+            const loaded = Number(ev?.loaded ?? 0);
+            const total = Number(ev?.total ?? 0);
+            const pct = total > 0 ? Math.round((loaded / total) * 100) : Math.round(loaded * 100);
+            const clamped = Math.max(0, Math.min(100, pct));
+            el.setupDownloadBtn.lastElementChild.textContent = `Downloading… ${clamped}%`;
+            setStatus(`Downloading on-device model… ${clamped}%`, 'neutral');
           });
         }
       });
-      session.destroy?.();
-      nanoStatus = null;
-      await saveSettings({ preferredEngine: 'nano' });
+      try { session?.destroy?.(); } catch {}
+      nanoStatus = { available: true, status: 'available' };
+      await saveSettings({ preferredEngine: 'nano', setupDismissed: true });
       state.engine = 'nano';
       engineSelect.setValue('nano', { silent: true });
+      setStatus('On-device model ready', 'success');
       toast('On-device model ready', 'success');
       await refreshSetupCard();
     } catch (err) {
-      toast(`Download failed: ${err.message}`, 'danger');
+      const msg = err?.message || String(err);
+      setStatus('Download failed', 'danger');
+      toast(
+        /feature flag|gating model execution/i.test(msg)
+          ? 'Browser model execution flag is disabled — check Settings'
+          : `Download failed: ${msg}`,
+        'danger'
+      );
+      if (/feature flag|gating model execution/i.test(msg)) {
+        nanoStatus = { available: false, status: 'error', error: msg };
+        await refreshSetupCard();
+      }
+    } finally {
       el.setupDownloadBtn.disabled = false;
+      el.setupDownloadBtn.lastElementChild.textContent = 'Download Chrome\'s on-device model';
     }
   });
 
@@ -915,6 +1348,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   }
   initSiteRow();
+  refreshTargetBadge();
 
   /* ------------------------------------------------------------ First run */
   function setOnboardingVisible(visible) {
@@ -935,6 +1369,37 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   setStatus('Ready', 'neutral');
 
+  async function restoreSession() {
+    if (!chrome.storage?.session) return;
+    try {
+      const stored = await chrome.storage.session.get(SESSION_KEY);
+      const snap = stored?.[SESSION_KEY];
+      if (!snap) return;
+      if (!snap.rawPrompt && !snap.latest && !(Array.isArray(snap.undoStack) && snap.undoStack.length)) return;
+      if (snap.framework && valid(snap.framework)) {
+        state.framework = snap.framework;
+        renderFrameworkTabs();
+      }
+      el.rawPrompt.value = snap.rawPrompt || '';
+      el.charCounter.textContent = String(el.rawPrompt.value.length);
+      undoStack.load(snap.undoStack);
+      if (snap.latest) {
+        restoreSnapshot({
+          text: snap.latest,
+          original: snap.original || '',
+          engine: snap.resultEngine || '',
+          framework: snap.resultFramework || state.framework,
+          data: snap.lastData || null,
+          variants: snap.variants || [],
+          scoreBefore: snap.scoreBefore ?? null
+        }, { statusText: 'Session restored' });
+      } else {
+        updateClearDraftVisibility();
+        resultActions.update(actionState());
+      }
+    } catch {}
+  }
+
   /* Text handed over by the service worker when the page it came from cannot
      host the in-page modal (chrome://, the Web Store, the PDF viewer). */
   const pending = await takePendingPrompt();
@@ -947,11 +1412,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     setOnboardingVisible(false);
     el.rawPrompt.value = pending.text;
     el.charCounter.textContent = String(pending.text.length);
+    updateClearDraftVisibility();
+    scheduleSessionSave();
     el.rawPrompt.focus();
     if (pending.autoRun) el.optimizeBtn.click();
   } else if (!settings.onboardingComplete) {
     setOnboardingVisible(true);
   } else {
+    await restoreSession();
     el.rawPrompt.focus();
   }
   if (settings.onboardingComplete || pending?.text) refreshSetupCard();

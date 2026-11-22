@@ -25,14 +25,74 @@ export function detectSecrets(text) {
 
 const CLOUD_ENGINES = ['gemini', 'openai', 'anthropic', 'openrouter'];
 
+/** Whether an endpoint targets the user's own machine. */
+export function isLocalEndpoint(rawUrl) {
+  const value = String(rawUrl ?? '').trim();
+  if (!value) return true;
+  try {
+    const host = new URL(value).hostname.toLowerCase();
+    return host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]';
+  } catch {
+    return false;
+  }
+}
+
+function hasCloudKey(settings = {}) {
+  return CLOUD_ENGINES.some(id => String(settings[`${id}ApiKey`] || '').trim());
+}
+
+function isOmnirouteRemote(settings = {}) {
+  const active = Boolean(
+    settings.omnirouteEnabled ||
+    String(settings.omnirouteApiKey || '').trim() ||
+    settings.preferredEngine === 'omniroute'
+  );
+  if (!active) return false;
+  return !isLocalEndpoint(settings.omnirouteBaseUrl || 'http://localhost:20128/v1');
+}
+
+const FALLBACK_ENGINE_FIELDS = ['fallback1Engine', 'fallback2Engine'];
+const OMNI_DEFAULT_URL = 'http://localhost:20128/v1';
+
 /**
- * Whether a run with `engine` may send the draft to a cloud provider. Nano is
- * on-device, but it falls back to any provider with a saved key.
+ * Whether a run with `engine` may send the draft to a remote/cloud provider.
+ * Local engines stay on-device when allowCloudFallback is false or an explicit
+ * `offline` fallback stops the chain before any cloud slot or key.
  */
 export function mayLeaveDevice(engine, settings = {}) {
   if (engine === 'offline') return false;
-  if (engine !== 'nano') return true;
-  return CLOUD_ENGINES.some(id => String(settings[`${id}ApiKey`] || '').trim());
+  if (CLOUD_ENGINES.includes(engine)) return true;
+
+  const omniUrl = settings.omnirouteBaseUrl || OMNI_DEFAULT_URL;
+  if (engine === 'omniroute' && !isLocalEndpoint(omniUrl)) return true;
+
+  if (engine === 'nano' || engine === 'omniroute') {
+    if (settings.allowCloudFallback === false) return false;
+
+    let stopped = false;
+    for (const field of FALLBACK_ENGINE_FIELDS) {
+      const slot = String(settings[field] || '').trim();
+      if (!slot) continue;
+      if (slot === 'offline') {
+        stopped = true;
+        break;
+      }
+      if (slot === engine) continue;
+      if (slot === 'omniroute') {
+        if (!isLocalEndpoint(omniUrl)) return true;
+        continue;
+      }
+      if (CLOUD_ENGINES.includes(slot) && String(settings[`${slot}ApiKey`] || '').trim()) {
+        return true;
+      }
+    }
+    if (stopped) return false;
+    return engine === 'nano'
+      ? Boolean(hasCloudKey(settings) || isOmnirouteRemote(settings))
+      : hasCloudKey(settings);
+  }
+
+  return true;
 }
 
 /** One sentence for the warning, or '' when there is nothing to warn about. */

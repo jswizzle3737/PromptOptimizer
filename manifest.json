@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "PromptOptimizer",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "Turn rough prompts into structured, high-performance ones, right inside ChatGPT, Claude, Gemini, Perplexity, Grok, Copilot and more.",
   "icons": {
     "16": "icons/icon-16.png",
@@ -28,7 +28,9 @@
         "https://chat.openai.com/*",
         "https://claude.ai/*",
         "https://gemini.google.com/*",
+        "https://aistudio.google.com/*",
         "https://www.perplexity.ai/*",
+        "https://perplexity.ai/*",
         "https://chat.deepseek.com/*",
         "https://chat.mistral.ai/*",
         "https://grok.com/*",
@@ -73,6 +75,8 @@
         "shared/secrets.js",
         "shared/clarify.js",
         "shared/templates.js",
+        "shared/scorer.js",
+        "shared/target-profiles.js",
         "assets/logo.png"
       ],
       "matches": [

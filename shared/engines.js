@@ -18,6 +18,11 @@ export const ENGINES = [
     fullLabel: 'Offline frameworks', fullDesc: 'No API required'
   },
   {
+    value: 'omniroute', icon: 'branch',
+    label: 'OmniRoute', desc: 'Router gateway',
+    fullLabel: 'OmniRoute Gateway', fullDesc: 'OpenAI-compatible router (local or remote)'
+  },
+  {
     value: 'openrouter', icon: 'branch',
     label: 'OpenRouter', desc: 'Your key',
     fullLabel: 'OpenRouter', fullDesc: 'Your API key · free models available'

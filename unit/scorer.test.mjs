@@ -2,7 +2,7 @@ import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { installChromeStub } from './helpers.mjs';
 import {
-  scorePrompt, judgeWithNano, contractTraitIds, rankVariants, SCORING_TRAITS
+  scorePrompt, judgeWithNano, setNanoJudgeBackend, contractTraitIds, rankVariants, SCORING_TRAITS
 } from '../shared/scorer.js';
 import { generateOfflineOptimization, DEFAULT_FRAMEWORKS } from '../shared/frameworks.js';
 import { optimizePrompt } from '../shared/optimizer-engine.js';
@@ -13,10 +13,12 @@ const originalLanguageModel = globalThis.LanguageModel;
 beforeEach(() => {
   globalThis.chrome = originalChrome;
   globalThis.LanguageModel = originalLanguageModel;
+  setNanoJudgeBackend(null);
 });
 afterEach(() => {
   globalThis.chrome = originalChrome;
   globalThis.LanguageModel = originalLanguageModel;
+  setNanoJudgeBackend(null);
 });
 
 /* Fixed corpus: the raw prompts every offline output must beat. This is the
@@ -31,7 +33,7 @@ const CORPUS = [
 ];
 
 function offlineSettings() {
-  installChromeStub({ promptcraft_settings: { schemaVersion: 3, preferredEngine: 'offline' } });
+  installChromeStub({ promptcraft_settings: { schemaVersion: 4, preferredEngine: 'offline' } });
 }
 
 /* ------------------------------------------------------------ rubric */
@@ -128,6 +130,20 @@ test('judgeWithNano parses a well-formed verdict', async () => {
   assert.deepEqual(r, { score: 88 });
 });
 
+test('judgeWithNano routes through registered backend when LanguageModel is absent', async () => {
+  delete globalThis.LanguageModel;
+  setNanoJudgeBackend({
+    status: async () => ({ available: true, status: 'available' }),
+    prompt: async ({ systemPrompt, userMessage }) => {
+      assert.match(systemPrompt, /prompt-quality reviewer/);
+      assert.match(userMessage, /<raw_prompt>\ndraft\n<\/raw_prompt>/);
+      return { text: '{"score": 91}' };
+    }
+  });
+  const verdict = await judgeWithNano('draft', 'Act as an expert.');
+  assert.deepEqual(verdict, { score: 91 });
+});
+
 test('judgeWithNano degrades to null on any failure, and always destroys the session', async () => {
   let record = fakeJudgeQueue(['banana — no json here']);
   assert.equal(await judgeWithNano('d', 'r'), null, 'unparseable reply');
@@ -146,6 +162,23 @@ test('judgeWithNano degrades to null on any failure, and always destroys the ses
     create: async () => { throw new Error('boom'); }
   };
   assert.equal(await judgeWithNano('d', 'r'), null, 'create() throwing');
+
+  let availCalls = 0;
+  let createOpts = null;
+  globalThis.LanguageModel = {
+    availability: async opts => {
+      availCalls++;
+      assert.deepEqual(opts?.expectedInputs, [{ type: 'text', languages: ['en'] }]);
+      assert.deepEqual(opts?.expectedOutputs, [{ type: 'text', languages: ['en'] }]);
+      const err = new Error('The feature flag gating model execution was disabled.');
+      err.name = 'NotSupportedError';
+      throw err;
+    },
+    create: async opts => { createOpts = opts; throw new Error('should not reach'); }
+  };
+  assert.equal(await judgeWithNano('d', 'r'), null);
+  assert.equal(availCalls, 1, 'NotSupportedError must not retry zero-arg availability()');
+  assert.equal(createOpts, null);
 });
 
 /* ------------------------------------------------------ variant ranking */
