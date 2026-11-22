@@ -23,28 +23,28 @@ test('defaults ship with no credential and Chrome Nano selected', () => {
   assert.equal(DEFAULT_SETTINGS.omnirouteEnabled, false);
   assert.equal(DEFAULT_SETTINGS.omnirouteBaseUrl, 'http://localhost:20128/v1');
   assert.equal(DEFAULT_SETTINGS.omnirouteModel, 'auto');
-  assert.equal(DEFAULT_SETTINGS.allowCloudFallback, true);
+  assert.equal(DEFAULT_SETTINGS.allowCloudFallback, false);
   assert.equal(DEFAULT_SETTINGS.fallback1Engine, '');
   assert.equal(DEFAULT_SETTINGS.fallback1Model, '');
   assert.equal(DEFAULT_SETTINGS.fallback2Engine, '');
   assert.equal(DEFAULT_SETTINGS.fallback2Model, '');
   assert.equal(DEFAULT_SETTINGS.quickRepairEnabled, true);
   assert.equal(DEFAULT_SETTINGS.preferredEngine, 'nano');
-  assert.equal(SCHEMA_VERSION, 5);
+  assert.equal(SCHEMA_VERSION, 6);
 });
 
 test('a fresh install resolves to the new defaults', async () => {
   const s = await migrateSettings(undefined, RETIRED_HASHES);
   assert.equal(s.openrouterApiKey, '');
   assert.equal(s.preferredEngine, 'nano');
-  assert.equal(s.allowCloudFallback, true);
+  assert.equal(s.allowCloudFallback, false);
   assert.equal(s.omnirouteEnabled, false);
   assert.equal(s.quickRepairEnabled, true);
   assert.equal(s.fallback1Engine, '');
   assert.equal(s.fallback1Model, '');
   assert.equal(s.fallback2Engine, '');
   assert.equal(s.fallback2Model, '');
-  assert.equal(s.schemaVersion, 5);
+  assert.equal(s.schemaVersion, SCHEMA_VERSION);
 
   const disabled = await migrateSettings({ schemaVersion: 5, quickRepairEnabled: false }, RETIRED_HASHES);
   assert.equal(disabled.quickRepairEnabled, false);
@@ -106,13 +106,15 @@ test('themes retired earlier still resolve', async () => {
   assert.equal(s.theme, 'dark');
 });
 
-test('getSettings persists the migration once', async () => {
+test('getSettings migrates on read and a worker write persists it', async () => {
   const data = installChromeStub({
     promptcraft_settings: { schemaVersion: 2, preferredEngine: 'openrouter', geminiModel: 'gemini-1.5-flash' }
   });
   const s = await getSettings();
-  assert.equal(s.schemaVersion, 5);
-  assert.equal(data.promptcraft_settings.schemaVersion, 5);
+  assert.equal(s.schemaVersion, SCHEMA_VERSION);
+  assert.equal(data.promptcraft_settings.schemaVersion, 2);
+  await saveSettings({});
+  assert.equal(data.promptcraft_settings.schemaVersion, SCHEMA_VERSION);
   assert.equal(data.promptcraft_settings.geminiModel, PROVIDER_DEFAULTS.gemini.model);
 });
 
@@ -160,7 +162,7 @@ test('escapeHtml neutralises single quotes as well as the double-quote set', () 
 
 /* ----------------------------------------------------------- v4/v5 migrations */
 
-test('v3 to v5 migration normalizes omniroute, allowCloudFallback, and maxHistoryItems', async () => {
+test('v3 to v6 migration normalizes omniroute, allowCloudFallback, and maxHistoryItems', async () => {
   const strict = await migrateSettings({
     schemaVersion: 3,
     allowCloudFallback: false,
@@ -168,7 +170,7 @@ test('v3 to v5 migration normalizes omniroute, allowCloudFallback, and maxHistor
     omnirouteBaseUrl: 'http://localhost:20128/',
     maxHistoryItems: 500
   }, RETIRED_HASHES);
-  assert.equal(strict.schemaVersion, 5);
+  assert.equal(strict.schemaVersion, SCHEMA_VERSION);
   assert.equal(strict.allowCloudFallback, false);
   assert.equal(strict.omnirouteEnabled, true, 'key enables omniroute automatically');
   assert.equal(strict.omnirouteBaseUrl, 'http://localhost:20128/v1');
@@ -183,10 +185,10 @@ test('v3 to v5 migration normalizes omniroute, allowCloudFallback, and maxHistor
   assert.equal(selected.omnirouteEnabled, true, 'preferredEngine omniroute enables gateway');
   assert.equal(selected.omnirouteBaseUrl, PROVIDER_DEFAULTS.omniroute.baseUrl);
   assert.equal(selected.maxHistoryItems, MAX_HISTORY_MIN);
-  assert.equal(selected.allowCloudFallback, true);
+  assert.equal(selected.allowCloudFallback, false);
 });
 
-test('v4 to v5 migration normalizes ordered fallback slots without forcing omnirouteEnabled', async () => {
+test('v4 to v6 migration normalizes ordered fallback slots without forcing omnirouteEnabled', async () => {
   const normalized = await migrateSettings({
     schemaVersion: 4,
     fallback1Engine: ' openai ',
@@ -195,7 +197,7 @@ test('v4 to v5 migration normalizes ordered fallback slots without forcing omnir
     fallback2Model: 'auto/coding:free',
     omnirouteEnabled: false
   }, RETIRED_HASHES);
-  assert.equal(normalized.schemaVersion, 5);
+  assert.equal(normalized.schemaVersion, SCHEMA_VERSION);
   assert.equal(normalized.fallback1Engine, 'openai');
   assert.equal(normalized.fallback1Model, 'gpt-4.1');
   assert.equal(normalized.fallback2Engine, 'omniroute');

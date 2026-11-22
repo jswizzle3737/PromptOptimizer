@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   test:
-    name: Unit tests and package
+    name: Unit tests, browser tests, and package
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
@@ -38,6 +38,25 @@ jobs:
 
       - name: Unit tests
         run: node --no-warnings --test "unit/*.test.mjs"
+
+      - name: DOM and contrast checks
+        run: |
+          node check_dom_contract.selftest.js
+          node check_dom_contract.js
+          node check_contrast.js
+
+      - name: Install Chrome for Testing
+        run: |
+          browser_url="$(curl --fail --silent --show-error --retry 3 \
+            https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json \
+            | node -e 'const {channels} = JSON.parse(require("node:fs").readFileSync(0, "utf8")); process.stdout.write(channels.Stable.downloads.chrome.find(entry => entry.platform === "linux64").url)')"
+          curl --fail --silent --show-error --retry 3 --location "$browser_url" --output "$RUNNER_TEMP/chrome-for-testing.zip"
+          unzip -q "$RUNNER_TEMP/chrome-for-testing.zip" -d "$RUNNER_TEMP"
+          printf 'BROWSER_PATH=%s\n' "$RUNNER_TEMP/chrome-linux64/chrome" >> "$GITHUB_ENV"
+
+      - name: Browser tests
+        run: node test_extension.js
+        timeout-minutes: 10
 
       - name: Package the extension
         run: node package.mjs
@@ -99,3 +118,38 @@ jobs:
           }
           console.log(`manifest.json valid (MV3 ${manifest.name} ${manifest.version}); ${zip} ok`);
           EOF
+
+  release:
+    name: Publish versioned GitHub release
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: promptoptimizer-release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "26"
+      - name: Publish ZIP for a new manifest version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="$(node -p 'require("./manifest.json").version')"
+          tag="v$version"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $tag already exists."
+            exit 0
+          fi
+          if ! command -v zip >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y zip
+          fi
+          node package.mjs
+          gh release create "$tag" "dist/promptoptimizer-$version.zip" \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "PromptOptimizer $version" --generate-notes

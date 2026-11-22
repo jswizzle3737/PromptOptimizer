@@ -1,0 +1,41 @@
+.reply-appbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-3) var(--space-6);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+}
+.reply-logo { width: 26px; height: 26px; object-fit: contain; }
+.reply-workspace { max-width: 1150px; margin: 0 auto; padding: var(--space-8) var(--space-6); }
+.reply-heading { margin-bottom: var(--space-6); }
+.reply-heading h1 { font-size: var(--text-2xl); margin: 0 0 var(--space-2); }
+.reply-heading p, .reply-panel p { margin: 0; }
+.reply-heading p { color: var(--text-secondary); }
+.reply-grid { display: grid; grid-template-columns: minmax(240px, 340px) minmax(0, 1fr); gap: var(--space-5); align-items: start; }
+.reply-flow, .reply-panel { display: grid; gap: var(--space-4); min-width: 0; }
+.reply-panel { padding: var(--space-5); background: var(--bg-surface); border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); }
+.reply-panel h2 { font-size: var(--text-lg); margin: 0; }
+.reply-panel textarea { width: 100%; resize: vertical; }
+.reply-actions, .reply-result-header, .reply-sample-row { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-3); }
+.reply-actions { align-items: end; }
+.reply-result-header { justify-content: space-between; }
+.reply-samples { list-style: none; padding: 0; margin: 0; }
+.reply-sample-row { justify-content: space-between; padding-block: var(--space-2); border-bottom: 1px solid var(--border-subtle); }
+.reply-sample-row label { display: flex; gap: var(--space-2); align-items: center; overflow-wrap: anywhere; }
+.reply-file { max-width: 100%; }
+.reply-file::file-selector-button {
+  margin-right: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  background: var(--bg-raised);
+  font: inherit;
+}
+.reply-status:empty, #reply-approval:empty, .reply-samples:empty { display: none; }
+.reply-status[data-error="true"] { color: var(--danger-fg); }
+@media (max-width: 740px) {
+  .reply-grid { grid-template-columns: minmax(0, 1fr); }
+  .reply-workspace { padding: var(--space-5) var(--space-3); }
+}

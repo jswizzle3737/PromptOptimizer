@@ -17,7 +17,7 @@ import { THEMES, DEFAULT_THEME, migrateTheme, LEGACY_THEME_IDS } from './theme-p
 export { THEMES, DEFAULT_THEME, migrateTheme, LEGACY_THEME_IDS, hasIcon };
 
 /** Bump when persisted shapes change. Read by `migrateSettings`. */
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 
 export const MAX_HISTORY_MIN = 5;
 export const MAX_HISTORY_MAX = 100;
@@ -129,7 +129,7 @@ export const DEFAULT_SETTINGS = {
   preferredFramework: 'smart-expand',
   enableFloatingWidget: true,
   quickRepairEnabled: true,
-  allowCloudFallback: true,
+  allowCloudFallback: false,
   fallback1Engine: '',
   fallback1Model: '',
   fallback2Engine: '',
@@ -199,7 +199,6 @@ export async function migrateSettings(stored, retiredKeyHashes = RETIRED_OPENROU
 
   // v3 → v4: OmniRoute gateway configuration, cloud fallback privacy control,
   // and clamped history capacity.
-  merged.allowCloudFallback = merged.allowCloudFallback !== false;
   merged.omnirouteApiKey = typeof merged.omnirouteApiKey === 'string' ? merged.omnirouteApiKey : '';
   merged.omnirouteBaseUrl = normalizeBaseUrl(merged.omnirouteBaseUrl) || PROVIDER_DEFAULTS.omniroute.baseUrl;
   const omModel = typeof merged.omnirouteModel === 'string' ? merged.omnirouteModel.trim() : '';
@@ -224,6 +223,13 @@ export async function migrateSettings(stored, retiredKeyHashes = RETIRED_OPENROU
     merged[mKey] = !validEngine || validEngine === 'nano' || validEngine === 'offline' ? '' : rawModel;
   }
 
+  // Earlier versions enabled cloud fallback by default, even with empty slots.
+  // Keep an existing opt-in only when the user chose a provider in a slot.
+  const hasNamedCloudFallback = [merged.fallback1Engine, merged.fallback2Engine]
+    .some(engine => engine && engine !== 'nano' && engine !== 'offline');
+  merged.allowCloudFallback = merged.allowCloudFallback === true &&
+    (stored?.schemaVersion === SCHEMA_VERSION || hasNamedCloudFallback);
+
   merged.quickRepairEnabled = merged.quickRepairEnabled !== false;
 
   merged.schemaVersion = SCHEMA_VERSION;
@@ -232,13 +238,7 @@ export async function migrateSettings(stored, retiredKeyHashes = RETIRED_OPENROU
 
 export async function getSettings() {
   const result = await chrome.storage.local.get('promptcraft_settings');
-  const migrated = await migrateSettings(result.promptcraft_settings);
-
-  // Persist the migration once, so it is not recomputed on every read.
-  if (result.promptcraft_settings && result.promptcraft_settings.schemaVersion !== SCHEMA_VERSION) {
-    await chrome.storage.local.set({ promptcraft_settings: migrated });
-  }
-  return migrated;
+  return migrateSettings(result.promptcraft_settings);
 }
 
 /* Serialises settings writes. saveSettings is read-modify-write, so two writes
@@ -254,7 +254,7 @@ export async function saveSettings(partial) {
   const run = settingsWriteChain.then(async () => {
     const result = await chrome.storage.local.get('promptcraft_settings');
     const current = await migrateSettings(result.promptcraft_settings);
-    const updated = await migrateSettings({ ...current, ...partial });
+    const updated = await migrateSettings({ ...current, ...partial, schemaVersion: SCHEMA_VERSION });
     await chrome.storage.local.set({ promptcraft_settings: updated });
     return updated;
   });

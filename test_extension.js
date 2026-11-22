@@ -75,9 +75,12 @@ const engineMenuVisibility = (rootExpr, slotSel) => `(async () => {
   await new Promise(r => setTimeout(r, 200));
   return { total: opts.length, visible };
 })()`;
-const TEMP_USER_DATA = path.join(os.tmpdir(), `chrome-test-profile-${Date.now()}`);
+const TEMP_ROOT = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'promptoptimizer-browser-')));
+const TEMP_USER_DATA = path.join(TEMP_ROOT, 'profile');
 
-const DEBUG_PORT = 9222;
+let debugPort = Number(process.env.PROMPTOPTIMIZER_CDP_PORT || 0);
+let fixturePort = Number(process.env.PROMPTOPTIMIZER_FIXTURE_PORT || 0);
+const fixtureUrl = (host, route) => `http://${host}:${fixturePort}${route}`;
 
 /* Chromium's DevTools endpoint does not reliably bind IPv4 on Windows — it
    often lands on [::1] only, which makes a hardcoded 127.0.0.1 fetch fail
@@ -102,17 +105,17 @@ async function cdpFetch(pathname, options = {}) {
   let lastErr;
   for (const host of CDP_HOSTS) {
     try {
-      const res = await fetch(`http://${host}:${DEBUG_PORT}${pathname}`, {
+      const res = await fetch(`http://${host}:${debugPort}${pathname}`, {
         ...options,
         signal: AbortSignal.timeout(CDP_TIMEOUT_MS)
       });
-      cdpBase = `http://${host}:${DEBUG_PORT}`;
+      cdpBase = `http://${host}:${debugPort}`;
       return res;
     } catch (err) {
       lastErr = err;
     }
   }
-  throw lastErr || new Error(`CDP unreachable on port ${DEBUG_PORT}`);
+  throw lastErr || new Error(`CDP unreachable on port ${debugPort}`);
 }
 
 async function sleep(ms) {
@@ -163,7 +166,7 @@ function createCdpClient(wsUrl) {
  * APIs, and the mock server runs on 127.0.0.1. Nothing else differs from what ships.
  */
 function prepareTestExtension() {
-  const dest = `${TEMP_USER_DATA}-ext`;
+  const dest = path.join(TEMP_ROOT, 'extension');
   fs.mkdirSync(dest, { recursive: true });
   // The same list the store package ships (ship-files.json).
   const { files } = JSON.parse(fs.readFileSync(path.join(EXT_PATH, 'ship-files.json'), 'utf8'));
@@ -173,7 +176,7 @@ function prepareTestExtension() {
   const manifestPath = path.join(dest, 'manifest.json');
   const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
   manifest.content_scripts[0].matches.push('http://127.0.0.1/*');
-  manifest.host_permissions = [...(manifest.host_permissions || []), 'http://127.0.0.1/*'];
+  manifest.host_permissions = [...(manifest.host_permissions || []), 'http://127.0.0.1/*', 'http://localhost/*'];
   fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
   return dest;
 }
@@ -190,11 +193,12 @@ async function runTests() {
   const browserArgs = [
     `--user-data-dir=${TEMP_USER_DATA}`,
     `--load-extension=${extUnderTest}`,
-    '--remote-debugging-port=9222',
+    `--remote-debugging-port=${debugPort}`,
     '--remote-debugging-address=127.0.0.1',
     '--no-first-run',
     '--no-default-browser-check',
     '--headless=new',
+    '--disable-features=OptimizationGuideOnDeviceModel',
     ...(process.platform === 'linux' ? ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu'] : []),
     'about:blank'
   ];
@@ -202,31 +206,33 @@ async function runTests() {
   console.log('\n[1/5] Launching Chromium in test mode...');
   const browserProcess = spawn(BROWSER_PATH, browserArgs, {
     stdio: 'ignore',
+    windowsHide: true,
     detached: process.platform !== 'win32'
   });
 
-  // Wait for CDP port to open
-  let connected = false;
-  for (let i = 0; i < 40; i++) {
-    try {
-      const res = await cdpFetch('/json/version');
-      if (res.ok) {
-        connected = true;
-        const ver = await res.json();
-        console.log(`✓ Connected to Chromium CDP: ${ver['Browser']} (via ${cdpBase})`);
-        break;
-      }
-    } catch {
-      // Port not up yet.
-    }
-    await sleep(300);
-  }
-
-  if (!connected) {
-    throw new Error(`Failed to connect to Chromium DevTools port ${DEBUG_PORT}`);
-  }
-
+  let browserSocket;
   try {
+    // A random debugging port avoids attaching to another browser.
+    for (let i = 0; i < 40; i++) {
+      try {
+        if (!debugPort) {
+          const activePort = fs.readFileSync(path.join(TEMP_USER_DATA, 'DevToolsActivePort'), 'utf8');
+          debugPort = Number(activePort.split('\n')[0]);
+        }
+        const res = await cdpFetch('/json/version');
+        if (res.ok) {
+          const ver = await res.json();
+          browserSocket = ver.webSocketDebuggerUrl;
+          console.log(`✓ Connected to Chromium CDP: ${ver.Browser} (via ${cdpBase})`);
+          break;
+        }
+      } catch {
+        // Port not up yet.
+      }
+      await sleep(300);
+    }
+    if (!browserSocket) throw new Error('Failed to connect to the test browser DevTools port.');
+
     // 2. Discover Targets
     console.log('\n[2/5] Detecting loaded extension targets...');
     let extensionId = null;
@@ -453,10 +459,10 @@ async function runTests() {
     }
     if (
       orKeyCheck.result.value.engine !== 'nano' ||
-      orKeyCheck.result.value.schemaVersion !== 5 ||
+      orKeyCheck.result.value.schemaVersion !== 6 ||
       orKeyCheck.result.value.fallback1Engine !== '' ||
       orKeyCheck.result.value.fallback2Engine !== '' ||
-      orKeyCheck.result.value.allowCloudFallback !== true ||
+      orKeyCheck.result.value.allowCloudFallback !== false ||
       orKeyCheck.result.value.omnirouteEnabled !== false
     ) {
       throw new Error(`Unexpected fresh-install settings: ${JSON.stringify(orKeyCheck.result.value)}`);
@@ -746,13 +752,13 @@ async function runTests() {
           || document.querySelector('.pc-assist__refine')?.hidden === true;
 
         // 3. Ask me first: questions, answer one, the draft gains the details.
-        $('raw-prompt').value = 'plan a team offsite';
+        $('raw-prompt').value = 'Plan a trip';
         $('ask-first-btn').click();
         const sheet = await until(() => !document.querySelector('.pc-clarify').hidden && document.querySelector('.pc-clarify'));
         out.questions = sheet ? [...sheet.querySelectorAll('.pc-clarify__q')].map(q => q.textContent) : [];
         out.clarifyNote = sheet?.querySelector('.pc-clarify__note')?.textContent || '';
         if (sheet) {
-          sheet.querySelector('input').value = 'Twelve engineers, remote-first';
+          sheet.querySelector('input').value = 'Lisbon, Portugal';
           sheet.querySelector('button[type="submit"]').click();
         }
         await until(() => $('status-message').textContent !== 'Optimizing…' && $('raw-prompt').value.includes('Details:'), 8000);
@@ -760,6 +766,7 @@ async function runTests() {
         out.draftAfterAnswers = $('raw-prompt').value;
 
         // 4. A credential in the draft is held back when it could leave the device.
+        await chrome.runtime.sendMessage({ type: 'WRITE_USER_DATA', operation: 'saveSettings', payload: { openaiApiKey: 'fixture-only' } });
         const engineSlot = document.querySelector('#engine-slot .pc-select');
         engineSlot.querySelector('.pc-select__trigger').click();
         await wait(200);
@@ -772,7 +779,12 @@ async function runTests() {
         out.secretShown = Boolean(notice);
         out.secretText = notice?.querySelector('.pc-callout__text')?.textContent || '';
         await wait(400);
-        out.secretBlockedRun = $('result-text').textContent === before && $('status-message').textContent !== 'Optimizing…';
+        notice?.querySelector('[data-act="send"]')?.click();
+        await wait(200);
+        out.secretBlockedRun = $('result-text').textContent === before && !notice?.hidden && $('status-message').textContent === 'Waiting for your approval';
+        notice?.querySelector('[data-act="cancel"]')?.click();
+        await until(() => $('status-message').textContent === 'Cancelled');
+        await chrome.runtime.sendMessage({ type: 'WRITE_USER_DATA', operation: 'saveSettings', payload: { openaiApiKey: '' } });
         engineSlot.querySelector('.pc-select__trigger').click();
         await wait(200);
         engineSlot.querySelector('.pc-select__option[data-value="nano"]').click();
@@ -801,8 +813,8 @@ async function runTests() {
     console.log('  assist:', JSON.stringify(assist));
     if (!assist.setupVisible) throw new Error('Setup card should show when Nano is missing and no key is saved: ' + JSON.stringify(assist));
     if (!assist.refineHiddenOnFallback) throw new Error('Refine actions must not be offered on an offline fallback');
-    if (assist.questions.length !== 3) throw new Error('Ask me first should show three questions: ' + JSON.stringify(assist.questions));
-    if (!/Details:\n- .*Twelve engineers, remote-first/.test(assist.draftAfterAnswers)) {
+    if (!/where.*dates.*budget/i.test(assist.questions.join(' '))) throw new Error('Ask me first should identify missing trip details: ' + JSON.stringify(assist.questions));
+    if (!/Details:\n- .*Lisbon, Portugal/.test(assist.draftAfterAnswers)) {
       throw new Error('Answers were not folded into the draft: ' + JSON.stringify(assist.draftAfterAnswers));
     }
     if (!assist.secretShown || !/AWS access key/.test(assist.secretText) || !assist.secretBlockedRun) {
@@ -1511,8 +1523,6 @@ async function runTests() {
     }
     console.log('✓ Options quick-repair Step 1 toggle persistence verified');
 
-    optionsClient.close();
-
     // 6. Test Content Script & Floating In-Page Widget
     console.log('\n[6/6] Testing Content Script & In-Page Floating Widget on Mock Chat Interface...');
     const http = require('http');
@@ -1533,6 +1543,18 @@ async function runTests() {
           const rawMatch = userMsg.match(/<raw_prompt>\n?([\s\S]*?)\n?<\/raw_prompt>/);
           const draft = (rawMatch ? rawMatch[1] : userMsg).trim();
           const isRepair = sys.includes('copy-editor repairing');
+           if (userMsg.includes('<incoming_email>')) {
+             if (!userMsg.includes('Can we meet Thursday?') || !userMsg.includes('Lead with the answer.') ||
+                 !userMsg.includes('Ask for an agenda.') || !userMsg.includes('Thanks for checking in.') ||
+                 userMsg.includes('Do not include this sample.')) {
+               res.writeHead(400, { 'Content-Type': 'application/json' });
+               res.end(JSON.stringify({ error: { message: 'Unexpected email drafting fields' } }));
+               return;
+             }
+             res.writeHead(200, { 'Content-Type': 'application/json' });
+             res.end(JSON.stringify({ choices: [{ message: { content: 'Thursday works for me. Could you send the agenda?' } }] }));
+             return;
+           }
 
           const respondJson = (content, delayMs = 0) => {
             const sendPayload = () => {
@@ -1725,7 +1747,11 @@ async function runTests() {
       `);
     });
 
-    await new Promise(r => server.listen(8765, '127.0.0.1', r));
+    await new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(fixturePort, '127.0.0.1', resolve);
+    });
+    fixturePort = server.address().port;
 
     try {
       const pageTabRes = await cdpFetch('/json/new', { method: 'PUT' });
@@ -1757,7 +1783,7 @@ async function runTests() {
       // events and the star button focus/blur logic would go untested.
       await pageClient.send('Emulation.setFocusEmulationEnabled', { enabled: true });
 
-      await pageClient.send('Page.navigate', { url: 'http://127.0.0.1:8765/chat' });
+      await pageClient.send('Page.navigate', { url: fixtureUrl('127.0.0.1', '/chat') });
       await sleep(1200);
 
       // Verify content script injected Shadow DOM root
@@ -2331,7 +2357,7 @@ async function runTests() {
       // Test composer-shell anchoring (clears internal Send button, skips hidden backing textarea, enhances contenteditable)
       console.log('→ Testing content script composer-shell anchoring and contenteditable quick enhance on /composer...');
       isolatedContextId = null;
-      await pageClient.send('Page.navigate', { url: 'http://127.0.0.1:8765/composer' });
+      await pageClient.send('Page.navigate', { url: fixtureUrl('127.0.0.1', '/composer') });
       for (let i = 0; i < 30 && !isolatedContextId; i++) await sleep(100);
       await sleep(500);
       const ceCheck = await evalInIsolated(`(async () => {
@@ -2403,7 +2429,7 @@ async function runTests() {
       // Test Gemini Quill rich-editor behavior (/gemini): multi-line repair->enhance, no paste event, NBSP survival, revert fidelity, layout shift, narrow viewport button clearance, and submit reset
       console.log('→ Testing Gemini Quill composer fixture (/gemini)...');
       isolatedContextId = null;
-      await pageClient.send('Page.navigate', { url: 'http://127.0.0.1:8765/gemini' });
+      await pageClient.send('Page.navigate', { url: fixtureUrl('127.0.0.1', '/gemini') });
       for (let i = 0; i < 40 && !isolatedContextId; i++) await sleep(100);
       await sleep(500);
 
@@ -2417,7 +2443,7 @@ async function runTests() {
             ...baseSettings,
             preferredEngine: 'omniroute',
             omnirouteEnabled: true,
-            omnirouteBaseUrl: 'http://127.0.0.1:8765/v1',
+            omnirouteBaseUrl: '${fixtureUrl('127.0.0.1', '/v1')}',
             preferredFramework: 'rtf',
             quickRepairEnabled: true,
             enableFloatingWidget: true
@@ -2546,7 +2572,7 @@ async function runTests() {
       // Navigate back to /chat and test full two-stage Repair -> Enhance, Alt+Click, in-button Revert, Cancel & Guards
       console.log('→ Testing two-stage Repair -> Enhance pipeline, Alt+Click, in-button Revert, mid-flight Cancel & Snapshot Guards...');
       isolatedContextId = null;
-      await pageClient.send('Page.navigate', { url: 'http://127.0.0.1:8765/chat' });
+      await pageClient.send('Page.navigate', { url: fixtureUrl('127.0.0.1', '/chat') });
       for (let i = 0; i < 50 && !isolatedContextId; i++) await sleep(100);
       await sleep(500);
 
@@ -2560,7 +2586,7 @@ async function runTests() {
             ...baseSettings,
             preferredEngine: 'omniroute',
             omnirouteEnabled: true,
-            omnirouteBaseUrl: 'http://127.0.0.1:8765/v1',
+            omnirouteBaseUrl: '${fixtureUrl('127.0.0.1', '/v1')}',
             preferredFramework: 'rtf',
             quickRepairEnabled: true,
             enableFloatingWidget: true
@@ -2644,7 +2670,7 @@ async function runTests() {
 
         // 5. Mid-flight composer edit snapshot guard aborts Step 2 overwrite
         await chrome.storage.local.set({
-          promptcraft_settings: { ...baseSettings, preferredEngine: 'omniroute', omnirouteEnabled: true, omnirouteBaseUrl: 'http://127.0.0.1:8765/v1', quickRepairEnabled: false, enableFloatingWidget: true }
+          promptcraft_settings: { ...baseSettings, preferredEngine: 'omniroute', omnirouteEnabled: true, omnirouteBaseUrl: '${fixtureUrl('127.0.0.1', '/v1')}', quickRepairEnabled: false, enableFloatingWidget: true }
         });
         await wait(120);
         ta.value = '__SLOW_EDIT__ base prompt';
@@ -2658,7 +2684,7 @@ async function runTests() {
 
         // 6. > 8000 char refusal + Clear-composer auto-reset
         await chrome.storage.local.set({
-          promptcraft_settings: { ...baseSettings, preferredEngine: 'omniroute', omnirouteEnabled: true, omnirouteBaseUrl: 'http://127.0.0.1:8765/v1', quickRepairEnabled: true, enableFloatingWidget: true }
+          promptcraft_settings: { ...baseSettings, preferredEngine: 'omniroute', omnirouteEnabled: true, omnirouteBaseUrl: '${fixtureUrl('127.0.0.1', '/v1')}', quickRepairEnabled: true, enableFloatingWidget: true }
         });
         await wait(120);
         ta.value = 'a'.repeat(8001);
@@ -2765,7 +2791,7 @@ async function runTests() {
       const otherClient = await createCdpClient(otherTab.webSocketDebuggerUrl);
       await otherClient.send('Runtime.enable');
       await otherClient.send('Page.enable');
-      await otherClient.send('Page.navigate', { url: 'http://localhost:8765/chat' });
+      await otherClient.send('Page.navigate', { url: fixtureUrl('localhost', '/chat') });
       await sleep(1500);
       const otherHost = await otherClient.send('Runtime.evaluate', {
         expression: 'Boolean(document.getElementById("promptcraft-root-host"))',
@@ -2775,6 +2801,195 @@ async function runTests() {
         throw new Error('Content script ran on an origin that is not on the AI-site list.');
       }
       console.log('✓ No injection on an unlisted origin');
+
+      const siteUrl = fixtureUrl('localhost', '/chat');
+      const siteOrigin = new URL(siteUrl).origin;
+      const manageSite = async type => {
+        const response = await optionsClient.send('Runtime.evaluate', {
+          expression: `(async () => {
+            const origin = ${JSON.stringify(siteOrigin)};
+            const [tab] = await chrome.tabs.query({ url: origin + '/*' });
+            return chrome.runtime.sendMessage({ type: ${JSON.stringify(type)}, origin, tabId: tab?.id });
+          })()`,
+          awaitPromise: true,
+          returnByValue: true
+        });
+        if (!response.result.value?.success) throw new Error('Site preference update failed: ' + JSON.stringify(response.result.value));
+      };
+      const saveSiteSettings = async payload => {
+        const message = { type: 'WRITE_USER_DATA', operation: 'saveSettings', payload };
+        const saved = await optionsClient.send('Runtime.evaluate', {
+          expression: `chrome.runtime.sendMessage(${JSON.stringify(message)})`,
+          awaitPromise: true,
+          returnByValue: true
+        });
+        if (!saved.result.value?.success) throw new Error('Could not set up the site fixture.');
+      };
+      await saveSiteSettings({
+        preferredEngine: 'nano',
+        omnirouteBaseUrl: fixtureUrl('127.0.0.1', '/v1'),
+        allowCloudFallback: true,
+        fallback1Engine: 'omniroute',
+        quickRepairEnabled: false,
+        enableFloatingWidget: true
+      });
+      await manageSite('ENABLE_SITE');
+      await otherClient.send('Emulation.setFocusEmulationEnabled', { enabled: true });
+      const runOnSite = (draft, waitForApproval) => otherClient.send('Runtime.evaluate', {
+        expression: `(async () => {
+          const field = document.getElementById('prompt-textarea');
+          const until = async fn => {
+            for (let i = 0; i < 40; i++) {
+              const value = fn();
+              if (value) return value;
+              await new Promise(resolve => setTimeout(resolve, 100));
+            }
+            return null;
+          };
+          const shadow = await until(() => document.getElementById('promptcraft-root-host')?.shadowRoot);
+          if (!shadow) return null;
+          const star = shadow.querySelector('#pc-star-btn');
+          field.value = ${JSON.stringify(draft)};
+          field.focus();
+          star.click();
+          if (!${waitForApproval}) return true;
+          const notice = await until(() => shadow.querySelector('.pc-quick-send-notice:not([hidden])'));
+          if (!notice) return null;
+          const rect = notice.querySelector('[data-act="send"]').getBoundingClientRect();
+          return {
+            draft: field.value,
+            destination: notice.querySelector('.pc-callout__text').textContent,
+            x: rect.x + rect.width / 2,
+            y: rect.y + rect.height / 2
+          };
+        })()`,
+        awaitPromise: true,
+        returnByValue: true
+      });
+
+      const exampleDraft = 'Write a sample test plan';
+      const approval = (await runOnSite(exampleDraft, true)).result.value;
+      if (approval?.draft !== exampleDraft || !approval.destination.includes(fixtureUrl('127.0.0.1', ''))) {
+        throw new Error('The configured fallback did not wait for approval with its destination visible.');
+      }
+      const click = { x: approval.x, y: approval.y, button: 'left', clickCount: 1 };
+      await otherClient.send('Input.dispatchMouseEvent', { ...click, type: 'mousePressed' });
+      await otherClient.send('Input.dispatchMouseEvent', { ...click, type: 'mouseReleased' });
+      const approvedResult = await otherClient.send('Runtime.evaluate', {
+        expression: `(async () => {
+          const field = document.getElementById('prompt-textarea');
+          for (let i = 0; i < 40 && !field.value.startsWith('ENHANCED_MOCK:'); i++) {
+            await new Promise(resolve => setTimeout(resolve, 100));
+          }
+          return field.value;
+        })()`,
+        awaitPromise: true,
+        returnByValue: true
+      });
+      if (approvedResult.result.value !== 'ENHANCED_MOCK: ' + exampleDraft) {
+        throw new Error('Approving a configured fallback did not deliver its rewrite.');
+      }
+      console.log('✓ Quick rewrite displayed the fallback destination and waited for a trusted click');
+
+      await saveSiteSettings({ preferredEngine: 'omniroute', quickRepairEnabled: true });
+      await otherClient.send('Runtime.evaluate', {
+        expression: `(() => {
+          const field = document.getElementById('prompt-textarea');
+          field.value = '';
+          field.dispatchEvent(new Event('input', { bubbles: true }));
+        })()`
+      });
+      const beginRun = await runOnSite('__SLOW_STEP1__ site deactivation test', false);
+      if (!beginRun.result.value) throw new Error('The opted-in site did not mount in the open tab.');
+      for (let attempt = 0; attempt < 20 && pendingMockTimers.size === 0; attempt++) await sleep(50);
+      if (!pendingMockTimers.size) throw new Error('The opted-in site did not start its delayed provider request.');
+      await manageSite('DISABLE_SITE');
+      await sleep(400);
+      const revoked = await otherClient.send('Runtime.evaluate', {
+        expression: '({ host: Boolean(document.getElementById("promptcraft-root-host")), draft: document.getElementById("prompt-textarea").value })',
+        returnByValue: true
+      });
+      if (revoked.result.value?.host || revoked.result.value?.draft !== '__SLOW_STEP1__ site deactivation test' || pendingMockTimers.size) {
+        throw new Error('Turning off an opted-in site did not remove its widget or preserve the draft.');
+      }
+      await otherClient.send('Page.reload');
+      await sleep(1000);
+      const reloaded = await otherClient.send('Runtime.evaluate', {
+        expression: 'Boolean(document.getElementById("promptcraft-root-host"))',
+        returnByValue: true
+      });
+      if (reloaded.result.value) throw new Error('The opted-out site was injected again after reloading.');
+      console.log('✓ Site deactivation removed the widget in the open tab and prevented reinjection');
+      const replyTab = await (await cdpFetch('/json/new', { method: 'PUT' })).json();
+      const replyClient = await createCdpClient(replyTab.webSocketDebuggerUrl);
+      const evaluateReply = async expression => {
+        const evaluated = await replyClient.send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
+        if (evaluated.exceptionDetails) throw new Error(JSON.stringify(evaluated.exceptionDetails));
+        return evaluated.result.value;
+      };
+      await replyClient.send('Page.enable');
+      const replyUrl = `chrome-extension://${extensionId}/options/email-reply.html`;
+      await replyClient.send('Page.navigate', { url: replyUrl });
+      await sleep(700);
+      const uploaded = await evaluateReply(`(async () => {
+        const files = document.getElementById('sample-files');
+        const upload = new DataTransfer();
+        upload.items.add(new File(['Thanks for checking in.'], 'voice.txt', { type: 'text/plain' }));
+        upload.items.add(new File(['Do not include this sample.'], 'other.md', { type: 'text/markdown' }));
+        files.files = upload.files;
+        files.dispatchEvent(new Event('change'));
+        for (let i = 0; i < 30 && document.querySelectorAll('#sample-list input').length !== 2; i++) {
+          await new Promise(resolve => setTimeout(resolve, 50));
+        }
+        const samples = document.querySelectorAll('#sample-list input');
+        if (samples.length !== 2) return false;
+        samples[1].click();
+        document.getElementById('style-instructions').value = 'Lead with the answer.';
+        document.getElementById('save-style').click();
+        return document.getElementById('style-status').textContent.includes('saved');
+      })()`);
+      if (!uploaded) throw new Error('Email writing style upload or save failed.');
+      await replyClient.send('Page.reload');
+      await sleep(700);
+      const emailApproval = await evaluateReply(`(async () => {
+        const samples = document.querySelectorAll('#sample-list input');
+        if (document.getElementById('style-instructions').value !== 'Lead with the answer.' ||
+            samples.length !== 2 || !samples[0].checked || samples[1].checked) return null;
+        document.getElementById('incoming-email').value = 'Can we meet Thursday?';
+        document.getElementById('reply-notes').value = 'Ask for an agenda.';
+        document.getElementById('reply-engine').value = 'omniroute';
+        document.getElementById('draft-reply').click();
+        for (let i = 0; i < 30; i++) {
+          const notice = document.querySelector('#reply-approval .pc-secret-notice:not([hidden])');
+          if (notice) {
+            const rect = notice.querySelector('[data-act="send"]').getBoundingClientRect();
+            return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2, privacy: notice.textContent.includes('samples you selected') };
+          }
+          await new Promise(resolve => setTimeout(resolve, 50));
+        }
+        return null;
+      })()`);
+      if (!emailApproval?.privacy) throw new Error('Email drafting did not display its provider approval.');
+      const emailClick = { x: emailApproval.x, y: emailApproval.y, button: 'left', clickCount: 1 };
+      await replyClient.send('Input.dispatchMouseEvent', { ...emailClick, type: 'mousePressed' });
+      await replyClient.send('Input.dispatchMouseEvent', { ...emailClick, type: 'mouseReleased' });
+      const emailDraft = await evaluateReply(`(async () => {
+        const draft = document.getElementById('reply-result');
+        const copy = document.getElementById('copy-reply');
+        for (let i = 0; i < 30 && copy.disabled; i++) await new Promise(resolve => setTimeout(resolve, 50));
+        const { promptcraft_history: history = [] } = await chrome.storage.local.get('promptcraft_history');
+        const storedStyle = localStorage.getItem('promptoptimizer.emailStyle.v1');
+        const savedEmail = JSON.stringify(history).includes('Can we meet Thursday?') ||
+          storedStyle.includes('Can we meet Thursday?') || storedStyle.includes(draft.value);
+        return { text: draft.value, editable: !draft.readOnly, canCopy: !copy.disabled, savedEmail };
+      })()`);
+      if (emailDraft.text !== 'Thursday works for me. Could you send the agenda?' ||
+          !emailDraft.editable || !emailDraft.canCopy || emailDraft.savedEmail) {
+        throw new Error('Email drafting did not produce an editable, copyable reply: ' + JSON.stringify(emailDraft));
+      }
+      console.log('✓ Email replies uploaded and restored a writing profile, shared only the selected sample, and generated an editable draft');
+      replyClient.close();
+      optionsClient.close();
       otherClient.close();
     } finally {
       for (const t of pendingMockTimers) clearTimeout(t);
@@ -2784,13 +2999,28 @@ async function runTests() {
 
     console.log('\n🎉 ALL 6 AUTOMATED VERIFICATION TESTS PASSED SUCCESSFULLY! 🎉');
   } finally {
+    if (browserSocket) {
+      let browserClient;
+      try {
+        await Promise.race([
+          (async () => {
+            browserClient = await createCdpClient(browserSocket);
+            await browserClient.send('Browser.close');
+          })(),
+          sleep(1500)
+        ]);
+      } catch {} finally {
+        browserClient?.close();
+      }
+      await sleep(350);
+    }
     /* Tear down only the browser tree we spawned.
        `taskkill /T` on Windows and `-pid` group kill on POSIX prevent orphaned
        child processes (zygote/GPU/renderers) from lingering on the debug port. */
     const pid = browserProcess.pid;
     if (pid) {
       if (process.platform === 'win32') {
-        try { spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' }); } catch {}
+        try { execFileSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true }); } catch {}
       } else {
         try { process.kill(-pid, 'SIGTERM'); } catch {}
         await sleep(350);
@@ -2817,6 +3047,7 @@ async function runTests() {
       console.warn(`⚠ Could not remove temp profile ${TEMP_USER_DATA} — delete it manually.`);
     }
     try { fs.rmSync(extUnderTest, { recursive: true, force: true }); } catch {}
+    try { fs.rmdirSync(TEMP_ROOT); } catch {}
   }
 }
 

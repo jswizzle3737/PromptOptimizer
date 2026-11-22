@@ -22,7 +22,20 @@
      loading. Register the listener synchronously and queue the request. */
   let handleOpen = null;
   let queuedOpen = null;
+  let handleSiteDisabled = null;
+  let siteAvailable = false;
+  const origin = location.origin;
+  const builtInSite = chrome.runtime.getManifest().content_scripts[0].matches.some(pattern => {
+    const site = new URL(pattern);
+    return site.protocol === location.protocol && site.hostname === location.hostname &&
+      (!site.port || site.port === location.port);
+  });
   chrome.runtime.onMessage.addListener(message => {
+    if (message?.type === 'OPTIMIZER_SITE_DISABLED' && message.origin === origin && !builtInSite) {
+      queuedOpen = null;
+      handleSiteDisabled?.();
+      return;
+    }
     if (message?.type !== 'OPEN_OPTIMIZER_MODAL') return;
     if (handleOpen) handleOpen(message.payload || {});
     else queuedOpen = message.payload || {};
@@ -49,6 +62,13 @@
       -webkit-font-smoothing: antialiased;
     }
     .pc-root *, .pc-root *::before, .pc-root *::after { box-sizing: border-box; }
+
+    .pc-quick-send-notice {
+      position: fixed;
+      inset: auto 12px 12px auto;
+      width: min(380px, calc(100vw - 24px));
+      pointer-events: auto;
+    }
 
     .pc-star-btn {
       position: fixed;
@@ -333,7 +353,7 @@
 
   async function loadModules() {
     try {
-      const [icons, select, themePicker, engines, saveSheet, library, runClient, assist, secrets, clarify, scorer, targetProfiles] = await Promise.all([
+      const [icons, select, themePicker, engines, saveSheet, library, runClient, assist, clarify, scorer, targetProfiles] = await Promise.all([
         import(SHARED + 'icons.js'),
         import(SHARED + 'select.js'),
         import(SHARED + 'theme-picker.js'),
@@ -342,12 +362,11 @@
         import(SHARED + 'library.js'),
         import(SHARED + 'run-client.js'),
         import(SHARED + 'assist.js'),
-        import(SHARED + 'secrets.js'),
         import(SHARED + 'clarify.js'),
         import(SHARED + 'scorer.js'),
         import(SHARED + 'target-profiles.js')
       ]);
-      return { icons, select, themePicker, engines, saveSheet, library, runClient, assist, secrets, clarify, scorer, targetProfiles };
+      return { icons, select, themePicker, engines, saveSheet, library, runClient, assist, clarify, scorer, targetProfiles };
     } catch (err) {
       console.warn('[PromptOptimizer] enhanced controls unavailable, falling back:', err);
       return null;
@@ -374,15 +393,13 @@
     root.innerHTML = TEMPLATE;
     shadow.appendChild(root);
 
-    document.body.appendChild(host);
-
     const ds = await loadModules();
     wire({ root, ds });
   }
 
   /* SPAs sometimes replace the whole body; put the host back if that happens. */
   function ensureHost() {
-    if (!host.isConnected && document.body) document.body.appendChild(host);
+    if ((siteAvailable || isModalOpen) && !host.isConnected && document.body) document.body.appendChild(host);
   }
 
   const TEMPLATE = `
@@ -599,8 +616,7 @@
     /* The full result on screen (null for a saved prompt), and the run in flight. */
     let lastData = null;
     let currentRun = null;
-    /* Draft the user chose to send despite the credential warning. */
-    let secretAllowedFor = '';
+    let clarifyRun = null;
 
     /* Off until settings have loaded, so a disabled widget never flashes. */
     let widgetEnabled = false;
@@ -1016,6 +1032,7 @@
         cancelQuickRun({ preserveRevert: Boolean(quickState.hasAppliedStep1) });
       }
       isModalOpen = true;
+      ensureHost();
       backdrop.classList.add('is-open');
       hideFloatingControls();
       refreshPlatformIdentity();
@@ -1024,12 +1041,14 @@
       try {
         stored = await chrome.storage.local.get(['promptcraft_settings', 'promptcraft_frameworks']);
       } catch {}
+      if (!isModalOpen) return;
       const settings = stored.promptcraft_settings || {};
       setTheme(settings.theme || 'dark');
       setEngine(settings.preferredEngine || DEFAULT_ENGINE);
       setVariantCount(settings.variantCount);
       contextToggle.checked = Boolean(settings.includePageContext);
       await renderFrameworkTabs({ frameworks: stored.promptcraft_frameworks, settings });
+      if (!isModalOpen) return;
 
       if (initialText) {
         rawInput.value = initialText;
@@ -1062,6 +1081,9 @@
       saveSheet?.close();
       libraryPicker?.close();
       clarifySheet?.close();
+      currentRun?.cancel();
+      clarifyRun?.cancel();
+      secretNotice?.hide();
       isModalOpen = false;
       backdrop.classList.remove('is-open');
       const focusTarget = (insertedTarget?.isConnected && insertedTarget)
@@ -1081,7 +1103,8 @@
         }
       }
       returnFocusTo = null;
-      if (widgetEnabled) {
+      if (!siteAvailable) host.remove();
+      if (widgetEnabled && siteAvailable) {
         if (currentTargetElement?.isConnected && isEligibleField(currentTargetElement)) {
           positionStarBtn(currentTargetElement);
         } else {
@@ -1144,12 +1167,6 @@
       const text = (payload.text || '').trim();
       return openModal(text, payload.autoRun && Boolean(text), { fromContextMenu: Boolean(payload.fromContextMenu) });
     };
-    if (queuedOpen) {
-      const queued = queuedOpen;
-      queuedOpen = null;
-      handleOpen(queued);
-    }
-
     /* Optimize --------------------------------------------------------- */
     function updateCharCount() {
       charCount.textContent = String(rawInput.value.length);
@@ -1197,24 +1214,20 @@
       techChips.hidden = false;
     }
 
-    /* Quality chip: rule rubric before → after, optionally refined on-device.
+    /* Framework coverage chip: rule rubric before → after, optionally refined on-device.
        Advisory only — it never blocks or downgrades a result. */
-    function renderQualityChip(score, rawText) {
-      const after = score?.after;
+    function renderQualityChip(score) {
+      const after = score?.ruleScore ?? score?.after;
       if (typeof after !== 'number') {
         qualityChip.hidden = true;
         return;
       }
       const before = typeof score?.before === 'number' ? score.before : null;
-      qualityChip.textContent = before != null ? `Quality ${before}→${after}` : `Quality ${after}/100`;
-      const bits = [];
-      if (score.method === 'nano+rules') bits.push(`on-device judge ${score.judgeScore} + rules ${score.ruleScore}`);
-      else if (score.method === 'nano') bits.push('judged on-device');
-      else bits.push('rule-based check');
+      qualityChip.textContent = before != null ? `Framework coverage ${before}→${after}` : `Quality ${after}/100`;
+      const bits = ['Checks which framework elements are present', 'Use Ask me first to identify missing details'];
       if (Array.isArray(score.missed) && score.missed.length) {
         bits.push(`not shown: ${score.missed.map(t => t.label).join(', ')}`);
       }
-      if (rawText) bits.push(`draft: ${rawText.slice(0, 120)}`);
       qualityChip.title = bits.join(' · ');
       qualityChip.className = 'pc-badge pc-badge--mono ' +
         (after >= 80 ? 'pc-badge--success' : after >= 55 ? 'pc-badge--accent' : 'pc-badge--warning');
@@ -1223,7 +1236,7 @@
 
     /* The "before" half of the quality chip; kept across variant switches and manual edits. */
     function scoreBefore() {
-      const m = qualityChip.textContent.match(/Quality (\d+)/);
+      const m = qualityChip.textContent.match(/Framework coverage (\d+)/);
       return m ? parseInt(m[1], 10) : null;
     }
 
@@ -1284,10 +1297,10 @@
       }
       renderVariantChips();
       renderTechChips(lastData?.techniques);
-      if (lastData?.score) renderQualityChip(lastData.score, lastOriginal);
+      if (lastData?.score) renderQualityChip(lastData.score);
       else if (latest && ds?.scorer) {
         const rule = ds.scorer.scorePrompt(latest, { traitIds: ds.scorer.contractTraitIds(lastFramework || activeFramework) });
-        renderQualityChip({ before: snap.scoreBefore ?? null, after: rule.score, missed: rule.missed, method: 'rules' }, lastOriginal);
+        renderQualityChip({ before: snap.scoreBefore ?? null, after: rule.score, missed: rule.missed, method: 'rules' });
       } else {
         qualityChip.hidden = true;
       }
@@ -1307,7 +1320,7 @@
             const rule = ds.scorer.scorePrompt(editedText, {
               traitIds: ds.scorer.contractTraitIds(lastFramework || activeFramework)
             });
-            renderQualityChip({ before: scoreBefore(), after: rule.score, missed: rule.missed, method: 'rules' }, lastOriginal);
+            renderQualityChip({ before: scoreBefore(), after: rule.score, missed: rule.missed, method: 'rules' });
           }
           renderVariantChips();
           resultActions?.update({ ...actionState(), busy });
@@ -1339,7 +1352,7 @@
           if (lastData) lastData = { ...lastData, optimized: latest };
           resultText.textContent = latest;
           renderVariantChips();
-          renderQualityChip({ before: scoreBefore(), after: variant.score, method: 'rules' }, lastOriginal);
+          renderQualityChip({ before: scoreBefore(), after: variant.score, method: 'rules' });
           resultActions?.update({ ...actionState(), busy });
         });
         variantChips.appendChild(btn);
@@ -1392,7 +1405,7 @@
       engineBadge.className = 'pc-badge pc-badge--mono ' +
         (data.degraded ? 'pc-badge--warning' : 'pc-badge--accent');
       engineBadge.hidden = !data.engine;
-      renderQualityChip(data.score, original);
+      renderQualityChip(data.score);
       currentVariants = Array.isArray(data.variants) ? data.variants : [];
       renderVariantChips();
       renderTechChips(data.techniques);
@@ -1442,6 +1455,7 @@
         setStatus('Done', 'success');
         toast(data.refinement ? 'Prompt refined' : 'Prompt optimized', 'success');
       }
+      if (data.historyWarning) toast(data.historyWarning, 'neutral');
       editableCtrl?.setEditable(Boolean(latest && !busy));
       resultActions?.update(actionState());
     }
@@ -1500,6 +1514,7 @@
         let data;
         if (ds?.runClient) {
           currentRun = ds.runClient.startRun(full, {
+            onApproval: reviewSend,
             onStart: (name, model) => {
               streamed = base;
               const label = ENGINE_LABELS[name] || name;
@@ -1533,6 +1548,7 @@
           data = await sendOnce(full);
         }
 
+        if (!isModalOpen) return;
         if (!data) {
           stopWaitTimer();
           if (preRunSnapshot) {
@@ -1565,6 +1581,7 @@
         toast(err.message, 'danger');
       } finally {
         stopWaitTimer();
+        secretNotice?.hide();
         resultText.classList.remove('is-streaming');
         currentRun = null;
         setBusy(false);
@@ -1581,24 +1598,14 @@
       return lines.join('\n');
     }
 
-    /** A credential in the draft stops the run until the user says so. */
-    async function blockedBySecret(text) {
-      if (!ds?.secrets || !secretNotice) return false;
-      const warning = ds.secrets.secretWarning(text, engine, await getSettings());
-      if (!warning || secretAllowedFor === text) return false;
-      secretNotice.show(warning);
-      return true;
-    }
-
     async function runOptimization() {
-      if (busy) { currentRun?.cancel(); return; }
+      if (busy) { (currentRun || clarifyRun)?.cancel(); return; }
       const text = rawInput.value.trim();
       if (!text) {
         toast('Type a prompt first', 'danger');
         rawInput.focus();
         return;
       }
-      if (await blockedBySecret(text)) return;
       await runRequest({ action: 'optimize', text, variantCount, context: pageContext(text) });
     }
 
@@ -1679,6 +1686,7 @@
       const activeRun = quickRun;
       quickRun = null;
       activeRun?.cancel?.();
+      quickNotice?.hide();
       if (preserveRevert && quickState.hasAppliedStep1 && quickState.target?.isConnected && getElementValue(quickState.target).trim()) {
         setStarVisual('repaired', 'Typos repaired — click to revert');
       } else if (isQuickBusy()) {
@@ -1688,8 +1696,19 @@
 
     async function runQuickWorker(payload, handlers) {
       if (ds?.runClient) {
-        quickRun = ds.runClient.startRun(payload, handlers);
-        return await quickRun.promise;
+        const target = quickState.target;
+        const draft = target ? getElementValue(target) : '';
+        const run = ds.runClient.startRun(payload, {
+          ...handlers,
+          async onApproval(details) {
+            if (!target?.isConnected || getElementValue(target) !== draft) return false;
+            const approved = await quickNotice?.ask(details);
+            return approved && target.isConnected && getElementValue(target) === draft;
+          }
+        });
+        quickRun = run;
+        try { return await run.promise; }
+        finally { if (quickRun === run) quickNotice?.hide(); }
       }
       return await sendOnce(payload);
     }
@@ -1792,17 +1811,6 @@
         const preFramework = settings.preferredFramework && frameworks.some(f => f.id === settings.preferredFramework)
           ? settings.preferredFramework
           : (frameworks[0]?.id || 'smart-expand');
-
-        if (ds?.secrets) {
-          const warning = ds.secrets.secretWarning(trimmed, preEngine, settings);
-          if (warning && secretAllowedFor !== trimmed) {
-            resetQuickState();
-            toast('Review secret warning before sending', 'danger');
-            await openModal(trimmed);
-            secretNotice?.show(warning);
-            return;
-          }
-        }
 
         let draftForEnhance = trimmed;
         let currentExpectedNorm = snapshot0;
@@ -1987,7 +1995,7 @@
             : (profile
               ? `Enhanced for ${profile.name}${engineLabel ? ` · ${engineLabel}` : ''}`
               : `Prompt enhanced${engineLabel ? ` · ${engineLabel}` : ''}`);
-          toast(msg, data.degraded ? 'neutral' : 'success', {
+          toast(data.historyWarning ? msg + '. ' + data.historyWarning : msg, data.degraded || data.historyWarning ? 'neutral' : 'success', {
             actionLabel: 'Undo',
             duration: 6000,
             onAction: revertQuickDraft
@@ -2017,18 +2025,25 @@
       }
     }
 
-    /* Secret warning, Ask me first, page context ------------------------ */
-    const secretNotice = ds?.assist
-      ? ds.assist.createSecretNotice({
-        onSendAnyway: () => {
-          secretAllowedFor = rawInput.value.trim();
-          runOptimization();
-        }
-      })
-      : null;
+    /* Send approval, Ask me first, page context ------------------------ */
+    const noticeOptions = { labelForEngine: name => ENGINE_LABELS[name] };
+    const secretNotice = ds?.assist.createSendNotice(noticeOptions);
+    const quickNotice = ds?.assist.createSendNotice(noticeOptions);
     if (secretNotice) {
       secretSlot.appendChild(secretNotice.element);
       rawInput.addEventListener('input', () => secretNotice.hide());
+    }
+    if (quickNotice) {
+      quickNotice.element.classList.add('pc-quick-send-notice');
+      root.appendChild(quickNotice.element);
+    }
+
+    async function reviewSend(details) {
+      stopWaitTimer();
+      setStatus('Waiting for your approval', 'warning');
+      const approved = await secretNotice?.ask(details);
+      if (approved) setStatus('Sending request…', 'neutral');
+      return approved;
     }
 
     const clarifySheet = ds?.assist && ds?.clarify && ds?.runClient
@@ -2052,21 +2067,23 @@
           rawInput.focus();
           return;
         }
-        if (busy || await blockedBySecret(text)) return;
-        askBtn.disabled = true;
+        if (busy || clarifyRun) return;
+        setBusy(true);
         setStatus('Thinking of questions…', 'neutral');
         try {
-          const res = await ds.runClient.startRun({ action: 'clarify', text, engine }).promise;
-          if (!res) return;
-          clarifySheet.open(res.questions, res.degraded
-            ? 'General questions: no AI engine was reachable to tailor them.'
-            : '');
+          clarifyRun = ds.runClient.startRun({ action: 'clarify', text, engine }, { onApproval: reviewSend });
+          const res = await clarifyRun.promise;
+          if (!isModalOpen) return;
+          if (!res) { setStatus('Cancelled', 'neutral'); return; }
+          clarifySheet.open(res.questions, res.engine === 'offline' ? 'Questions suggested on this device.' : '');
           setStatus('Ready', 'neutral');
         } catch (err) {
           setStatus('Failed', 'danger');
           toast(err.message, 'danger');
         } finally {
-          askBtn.disabled = busy;
+          secretNotice?.hide();
+          clarifyRun = null;
+          setBusy(false);
         }
       });
     } else {
@@ -2591,7 +2608,7 @@
       // Nothing shows while focus sits in a field we must not serve (a password
       // box, say) — including when a delayed re-scan fires with it focused.
       const active = getDeepActiveElement();
-      if (!widgetEnabled || !targetEl.isConnected || !isEligibleField(targetEl) || (isFieldLike(active) && !isEligibleField(active))) {
+      if (!siteAvailable || !widgetEnabled || !targetEl.isConnected || !isEligibleField(targetEl) || (isFieldLike(active) && !isEligibleField(active))) {
         hideFloatingControls();
         return;
       }
@@ -2702,7 +2719,7 @@
       positionRafId = requestAnimationFrame(() => {
         positionRafId = 0;
         const activeNow = getDeepActiveElement();
-        if (isModalOpen || !widgetEnabled || !targetEl.isConnected || (isFieldLike(activeNow) && !isEligibleField(activeNow))) {
+        if (isModalOpen || !siteAvailable || !widgetEnabled || !targetEl.isConnected || (isFieldLike(activeNow) && !isEligibleField(activeNow))) {
           return;
         }
         starBtn.style.top = `${chosen.top}px`;
@@ -2757,6 +2774,7 @@
     }
 
     function autoDetectAndPosition() {
+      if (!siteAvailable) return;
       const input = findChatInput();
       if (input) {
         currentTargetElement = input;
@@ -2791,9 +2809,10 @@
        composers or keep the star aligned when SPAs shift layout. */
     let scanTimer = 0;
     function scheduleScan() {
-      if (scanTimer) return;
+      if ((!siteAvailable && !isModalOpen) || scanTimer) return;
       scanTimer = setTimeout(() => {
         scanTimer = 0;
+        if (!siteAvailable && !isModalOpen) return;
         ensureHost();
         syncQuickResetWatchers();
         if (!currentTargetElement?.isConnected || !isEligibleField(currentTargetElement) || !isVisibleElement(currentTargetElement)) {
@@ -2815,9 +2834,26 @@
       }, 250);
     }
 
-    try {
-      new MutationObserver(scheduleScan).observe(document.body, { childList: true, subtree: true });
-    } catch {}
+    const pageObserver = new MutationObserver(scheduleScan);
+
+    function setSiteAvailable(enabled) {
+      siteAvailable = enabled;
+      if (enabled) {
+        ensureHost();
+        pageObserver.observe(document.body, { childList: true, subtree: true });
+        if (widgetEnabled) autoDetectAndPosition();
+      } else {
+        pageObserver.disconnect();
+        clearTimeout(scanTimer);
+        scanTimer = 0;
+        cancelQuickRun();
+        resetQuickState();
+        if (isModalOpen) closeModal();
+        hideFloatingControls();
+        host.remove();
+      }
+    }
+    handleSiteDisabled = () => setSiteAvailable(false);
 
     document.addEventListener('input', e => {
       if (isQuickWriting || isQuickBusy() || quickState.mode === 'idle') return;
@@ -2841,6 +2877,7 @@
     }, true);
 
     document.addEventListener('focusin', e => {
+      if (!siteAvailable) return;
       syncQuickResetWatchers();
       const evtTarget = getDeepEventTarget(e);
       const el = fieldFrom(evtTarget);
@@ -2856,6 +2893,7 @@
     }, true);
 
     document.addEventListener('click', e => {
+      if (!siteAvailable) return;
       const evtTarget = getDeepEventTarget(e);
       if (evtTarget instanceof Element && !host.contains(evtTarget) && !isQuickBusy() && quickState.mode !== 'idle') {
         if (evtTarget.closest('button, [role="button"], [type="submit"]')) {
@@ -2889,6 +2927,10 @@
 
     chrome.storage.onChanged.addListener((changes, area) => {
       if (area !== 'local') return;
+      if (!builtInSite && changes.promptcraft_sites) {
+        const { oldValue = [], newValue = [] } = changes.promptcraft_sites;
+        if (oldValue.includes(origin) !== newValue.includes(origin)) setSiteAvailable(newValue.includes(origin));
+      }
       if (changes.promptcraft_frameworks || changes.promptcraft_settings) renderFrameworkTabs();
 
       const next = changes.promptcraft_settings?.newValue;
@@ -2918,7 +2960,7 @@
     (async () => {
       let stored = {};
       try {
-        stored = await chrome.storage.local.get(['promptcraft_settings', 'promptcraft_frameworks']);
+        stored = await chrome.storage.local.get(['promptcraft_settings', 'promptcraft_frameworks', 'promptcraft_sites']);
       } catch {}
       const settings = stored.promptcraft_settings || {};
       widgetEnabled = settings.enableFloatingWidget !== false;
@@ -2930,10 +2972,14 @@
       contextToggle.checked = Boolean(settings.includePageContext);
       if (settings.preferredFramework) activeFramework = settings.preferredFramework;
       refreshPlatformIdentity();
+      if (builtInSite || (stored.promptcraft_sites || []).includes(origin)) setSiteAvailable(true);
       await renderFrameworkTabs({ frameworks: stored.promptcraft_frameworks, settings });
-
-      if (widgetEnabled) {
-        autoDetectAndPosition();
+      if (queuedOpen) {
+        const queued = queuedOpen;
+        queuedOpen = null;
+        handleOpen(queued);
+      }
+      if (siteAvailable && widgetEnabled) {
         setTimeout(autoDetectAndPosition, 800);
         setTimeout(autoDetectAndPosition, 2000);
       }

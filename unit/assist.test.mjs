@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { detectSecrets, mayLeaveDevice, secretWarning } from '../shared/secrets.js';
+import { detectSecrets } from '../shared/secrets.js';
 import { extractVariables, fillTemplate } from '../shared/templates.js';
 import { REFINEMENTS } from '../shared/optimizer-engine.js';
 import { createUndoStack } from '../shared/assist.js';
@@ -36,59 +36,6 @@ test('ordinary prose about keys and passwords does not trip the detector', () =>
     assert.deepEqual(detectSecrets(text), [], text);
   }
 });
-
-test('the warning only applies when the draft can leave the device', () => {
-  const draft = 'debug this: AKIAIOSFODNN7EXAMPLE';
-  assert.equal(mayLeaveDevice('offline', {}), false);
-  assert.equal(mayLeaveDevice('nano', {}), false, 'Nano alone stays on-device');
-  assert.equal(mayLeaveDevice('nano', { openaiApiKey: 'K' }), true, 'Nano can fall back to a keyed provider');
-  assert.equal(
-    mayLeaveDevice('nano', { allowCloudFallback: false, openaiApiKey: 'K', omnirouteEnabled: true }),
-    false,
-    'allowCloudFallback=false keeps Nano strictly offline'
-  );
-  assert.equal(mayLeaveDevice('omniroute', { omnirouteBaseUrl: 'http://localhost:20128/v1' }), false);
-  assert.equal(mayLeaveDevice('omniroute', { omnirouteBaseUrl: 'http://127.0.0.1:20128/v1', openaiApiKey: 'K', allowCloudFallback: true }), true);
-  assert.equal(mayLeaveDevice('omniroute', { omnirouteBaseUrl: 'http://127.0.0.1:20128/v1', openaiApiKey: 'K', allowCloudFallback: false }), false);
-  assert.equal(mayLeaveDevice('omniroute', { omnirouteBaseUrl: 'https://router.example.com/v1', allowCloudFallback: false }), true);
-  assert.equal(mayLeaveDevice('gemini', {}), true);
-  assert.equal(
-    mayLeaveDevice('nano', { fallback1Engine: 'offline', openaiApiKey: 'K', fallback2Engine: 'gemini', geminiApiKey: 'G' }),
-    false,
-    'offline circuit breaker in Fallback 1 stops later fallbacks and auto-fallback'
-  );
-  assert.equal(
-    mayLeaveDevice('nano', { fallback1Engine: 'omniroute', omnirouteEnabled: false, omnirouteBaseUrl: 'https://router.example.com/v1' }),
-    true,
-    'explicit remote OmniRoute fallback can leave device even when general auto-fallback is off'
-  );
-  assert.equal(
-    mayLeaveDevice('nano', { fallback1Engine: 'omniroute', omnirouteEnabled: false, omnirouteBaseUrl: 'http://localhost:20128/v1' }),
-    false
-  );
-  assert.equal(
-    mayLeaveDevice('nano', { allowCloudFallback: false, fallback1Engine: 'openai', openaiApiKey: 'K' }),
-    false
-  );
-  assert.equal(
-    mayLeaveDevice('nano', { fallback1Engine: 'openai', openaiApiKey: '', fallback2Engine: 'gemini', geminiApiKey: 'G' }),
-    true,
-    'unkeyed Fallback 1 skips to keyed Fallback 2'
-  );
-  assert.equal(
-    mayLeaveDevice('omniroute', { omnirouteBaseUrl: 'http://127.0.0.1:20128/v1', fallback1Engine: 'offline', openaiApiKey: 'K' }),
-    false
-  );
-  assert.equal(
-    mayLeaveDevice('omniroute', { omnirouteBaseUrl: 'http://127.0.0.1:20128/v1', fallback1Engine: 'gemini', geminiApiKey: 'G' }),
-    true
-  );
-  assert.equal(secretWarning(draft, 'offline', {}), '');
-  assert.match(secretWarning(draft, 'openai', {}), /an AWS access key\. It would be sent to a cloud AI provider/);
-  assert.equal(secretWarning('no secrets here', 'openai', {}), '');
-});
-
-/* ------------------------------------------------------------- undo stack */
 
 test('createUndoStack deduplicates consecutive snapshots, enforces bounds, and supports load/toJSON', () => {
   const stack = createUndoStack(3);

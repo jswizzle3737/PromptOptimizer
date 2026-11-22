@@ -152,7 +152,7 @@ test('install recreates the menu from scratch and migrates stored settings', asy
   Object.assign(stub, { promptcraft_settings: { schemaVersion: 2, geminiModel: 'gemini-1.5-flash' } });
   await fire('installed', { reason: 'update' });
   assert.deepEqual(names().slice(0, 2), ['removeAll', 'create'], 'removeAll must precede create');
-  assert.equal(stub.promptcraft_settings.schemaVersion, 5);
+  assert.equal(stub.promptcraft_settings.schemaVersion, 6);
   assert.notEqual(stub.promptcraft_settings.geminiModel, 'gemini-1.5-flash');
 });
 
@@ -284,7 +284,7 @@ test('the in-page design picker writes one field through the worker', async () =
   assert.equal(stub.promptcraft_settings.theme, 'ember');
   assert.equal(stub.promptcraft_settings.geminiApiKey, 'keep-me', 'other fields, keys included, are untouched');
   assert.equal(stub.promptcraft_settings.preferredEngine, 'offline');
-  assert.equal(stub.promptcraft_settings.schemaVersion, 5);
+  assert.equal(stub.promptcraft_settings.schemaVersion, 6);
 });
 
 test('a page cannot store an arbitrary or retired design', async () => {
@@ -298,7 +298,7 @@ test('a page cannot store an arbitrary or retired design', async () => {
 test('the in-page design write migrates old settings instead of preserving them stale', async () => {
   Object.assign(stub, { promptcraft_settings: { schemaVersion: 2, geminiModel: 'gemini-1.5-flash', theme: 'dark' } });
   await send({ type: 'SET_THEME', payload: { theme: 'harbor' } }, { tab: { id: 3 } });
-  assert.equal(stub.promptcraft_settings.schemaVersion, 5);
+  assert.equal(stub.promptcraft_settings.schemaVersion, 6);
   assert.notEqual(stub.promptcraft_settings.geminiModel, 'gemini-1.5-flash');
 });
 
@@ -333,6 +333,86 @@ test('optimize port: an offline run posts start-free done with the result', asyn
   assert.ok(done, JSON.stringify(port.posted));
   assert.equal(done.data.engine, 'offline');
   assert.ok(done.data.optimized.length > 20);
+});
+
+test('a failed history write returns a usable rewrite and a history warning', async () => {
+  const write = chrome.storage.local.set;
+  chrome.storage.local.set = async changes => {
+    if ('promptcraft_history' in changes) throw new Error('Storage is full');
+    return write(changes);
+  };
+  try {
+    const port = fakePort();
+    await fire('connect', port);
+    await port.send({ type: 'start', payload: { engine: 'offline', text: 'Write a test plan' } });
+    const done = port.posted.at(-1);
+    assert.equal(done.type, 'done');
+    assert.match(done.data.optimized, /Write a test plan/i);
+    assert.match(done.data.historyWarning, /could not be saved to history/i);
+  } finally {
+    chrome.storage.local.set = write;
+  }
+});
+
+test('writes from separate extension surfaces retain both settings changes and library entries', async () => {
+  const write = (operation, payload) => send({ type: 'WRITE_USER_DATA', operation, payload });
+  const results = await Promise.all([
+    write('saveSettings', { variantCount: 3 }),
+    send({ type: 'SET_THEME', payload: { theme: 'rose' } }, { tab: { id: 7 } }),
+    write('saveToLibrary', { text: 'Draft saved by the popup' }),
+    send({ type: 'SAVE_PROMPT', payload: { text: 'Draft saved from the page' } }, { tab: { id: 7 } })
+  ]);
+  assert.ok(results.every(result => result.success));
+  assert.equal(stub.promptcraft_settings.theme, 'rose');
+  assert.equal(stub.promptcraft_settings.variantCount, 3);
+  assert.deepEqual(stub.promptcraft_library.map(entry => entry.text).sort(),
+    ['Draft saved by the popup', 'Draft saved from the page']);
+});
+
+test('provider approval covers page context, edited results, custom instructions and system guidelines', async t => {
+  const originalFetch = globalThis.fetch;
+  const outbound = [];
+  globalThis.fetch = async (_url, init) => {
+    outbound.push(JSON.parse(init.body).messages);
+    return Response.json({ choices: [{ message: { content: 'A completed rewrite' } }] });
+  };
+  const text = 'Write a test plan';
+  const marker = 'password=fixture-only-password';
+  const cases = [
+    ['context', { text, context: marker, variantCount: 2 }],
+    ['edited result', { action: 'refine', kind: 'shorter', text, previous: marker }],
+    ['custom instruction', { action: 'refine', kind: 'custom', text, previous: text, instruction: marker }],
+    ['system guidelines', { text }, { customSystemPrompt: marker }],
+    ['clarification', { action: 'clarify', text: marker }],
+    ['repair', { action: 'repair', text: marker }]
+  ];
+  try {
+    for (const [title, payload, settings] of cases) {
+      await t.test(title, async () => {
+        stub.promptcraft_settings = { schemaVersion: 6, preferredEngine: 'openai', openaiApiKey: 'fixture-only', ...settings };
+        const port = fakePort();
+        await fire('connect', port);
+        const sentBefore = outbound.length;
+        const running = port.send({ type: 'start', payload });
+        await settle();
+        const approval = port.posted.find(message => message.type === 'approval');
+        assert.equal(approval.details.origin, 'https://api.openai.com');
+        assert.deepEqual(approval.details.secrets, ['a password']);
+        assert.equal(JSON.stringify(approval).includes(marker), false);
+        assert.equal(outbound.length, sentBefore);
+        await port.send({ type: 'approval', id: approval.id + 1, approved: true });
+        assert.equal(outbound.length, sentBefore);
+        const approved = title === 'context';
+        await port.send({ type: 'approval', id: approval.id, approved });
+        await running;
+        assert.equal(port.posted.at(-1).type, approved ? 'done' : 'cancelled');
+        assert.equal(outbound.length, sentBefore + Number(approved));
+        if (approved) assert.ok(outbound.at(-1).some(message => message.content.includes(marker)));
+      });
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test('optimize port: cancel aborts an in-flight request and reports cancelled', async () => {
@@ -409,6 +489,7 @@ test('optimize port: start events carry model ID across ordered same-provider fa
     preferredEngine: 'openai',
     openaiApiKey: 'K',
     openaiModel: 'gpt-4.1',
+    allowCloudFallback: true,
     fallback1Engine: 'openai',
     fallback1Model: 'gpt-4o-mini'
   };
@@ -429,8 +510,15 @@ test('optimize port: start events carry model ID across ordered same-provider fa
   try {
     const port = fakePort();
     await fire('connect', port);
-    await port.send({ type: 'start', payload: { text: 'write a test plan' } });
+    const running = port.send({ type: 'start', payload: { text: 'write a test plan' } });
     await settle();
+    const approval = port.posted.find(m => m.type === 'approval');
+    assert.equal(approval.details.origin, 'https://api.openai.com');
+    assert.equal(approval.details.model, 'gpt-4o-mini');
+    assert.equal(approval.details.fallback, true);
+    assert.equal(port.posted.some(message => message.type === 'done'), false);
+    await port.send({ type: 'approval', id: approval.id, approved: true });
+    await running;
     const starts = port.posted.filter(m => m.type === 'start');
     assert.deepEqual(starts.map(s => [s.engine, s.model]), [
       ['openai', 'gpt-4.1'],

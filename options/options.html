@@ -26,6 +26,9 @@
     </div>
 
     <div class="pc-appbar__actions">
+      <a class="pc-btn pc-btn--secondary pc-btn--md" href="email-reply.html">
+        <span data-icon="send" data-icon-size="14"></span><span>Email replies</span>
+      </a>
       <span class="pc-appbar__status" id="save-status">
         <span class="pc-status-dot pc-status-dot--success" id="save-status-dot"></span>
         <span id="save-status-text">Saved locally</span>
@@ -122,7 +125,7 @@
 
           <div class="pc-field">
             <span class="pc-field__label">Ordered fallback models</span>
-            <span class="pc-field__hint">Tried in order if your chosen engine fails (for example another model on the same provider, or another engine). Leave Model ID override empty to use that provider's default model.</span>
+            <span class="pc-field__hint">Choose which providers can be tried in order if your selected engine fails. Leave Model ID override empty to use that provider's default model.</span>
             <div class="pc-fallback-list">
               <div class="pc-fallback-row" id="fallback-1-row">
                 <div class="pc-fallback-row__head">
@@ -177,9 +180,9 @@
             <label class="pc-switch">
               <input type="checkbox" id="allow-cloud-fallback">
               <span class="pc-switch__track"><span class="pc-switch__thumb"></span></span>
-              <span class="pc-switch__label">Allow cloud fallback when Chrome Nano is unavailable or errors</span>
+              <span class="pc-switch__label">Allow the fallback providers I choose above</span>
             </label>
-            <span class="pc-field__hint">Turn this off to keep Chrome Nano strictly on-device and offline without falling back to saved cloud keys.</span>
+            <span class="pc-field__hint">The offline template is the default backup for rewrites. If you enable provider fallback, you will review the destination before the extension sends the request.</span>
           </div>
 
           <hr class="pc-divider">
@@ -269,7 +272,7 @@
               <label class="pc-switch pc-switch--compact">
                 <input type="checkbox" id="omniroute-enabled">
                 <span class="pc-switch__track"><span class="pc-switch__thumb"></span></span>
-                <span class="pc-switch__label">Enable fallback</span>
+                <span class="pc-switch__label">Mark gateway as configured</span>
               </label>
             </div>
             <div class="pc-grid-2">

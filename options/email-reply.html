@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PromptOptimizer · Email replies</title>
+  <link rel="stylesheet" href="../shared/theme.css">
+  <link rel="stylesheet" href="../shared/base.css">
+  <link rel="stylesheet" href="../shared/components.css">
+  <link rel="stylesheet" href="email-reply.css">
+</head>
+<body>
+  <header class="reply-appbar">
+    <div class="pc-brand">
+      <img src="../assets/logo.png" class="reply-logo" alt="">
+      <span class="pc-brand__name">PromptOptimizer</span>
+    </div>
+    <a href="options.html" class="pc-btn pc-btn--ghost pc-btn--sm"><span data-icon="settings"></span> Settings</a>
+  </header>
+  <main class="reply-workspace">
+    <div class="reply-heading">
+      <h1>Email replies</h1>
+      <p>Draft a reply using your writing samples and style instructions.</p>
+    </div>
+    <div class="reply-grid">
+      <aside class="reply-panel" aria-labelledby="profile-heading">
+        <h2 id="profile-heading">Writing style</h2>
+        <div class="pc-field">
+          <label class="pc-field__label" for="style-instructions">Style instructions</label>
+          <textarea class="pc-input" id="style-instructions" rows="5"
+                    placeholder="For example, lead with the answer, use short paragraphs, and sign off with Thanks, Alex."></textarea>
+        </div>
+        <div class="pc-field">
+          <label class="pc-field__label" for="sample-files">Writing samples</label>
+          <input class="pc-input reply-file" type="file" id="sample-files" accept=".txt,.md,.markdown" multiple
+                 aria-describedby="sample-hint">
+          <p class="pc-field__hint" id="sample-hint">Upload up to five text or Markdown files. Check the samples you want to use in a reply.</p>
+          <ul id="sample-list" class="reply-samples" aria-label="Writing samples"></ul>
+        </div>
+        <div>
+          <button class="pc-btn pc-btn--secondary pc-btn--md" type="button" id="save-style">
+            <span data-icon="save"></span> Save writing style
+          </button>
+          <p class="pc-field__hint">Your saved style stays in this browser.</p>
+          <p id="style-status" role="status" class="reply-status"></p>
+        </div>
+      </aside>
+      <div class="reply-flow">
+        <form class="reply-panel" id="reply-form" aria-labelledby="compose-heading">
+          <h2 id="compose-heading">Draft a reply</h2>
+          <div class="pc-field">
+            <label class="pc-field__label" for="incoming-email">Incoming email</label>
+            <textarea class="pc-input" id="incoming-email" rows="7" required
+                      placeholder="Paste the email or the part of the thread you want to answer."></textarea>
+          </div>
+          <div class="pc-field">
+            <label class="pc-field__label" for="reply-notes">What should your reply say? <span class="pc-field__hint">Optional</span></label>
+            <textarea class="pc-input" id="reply-notes" rows="3"
+                      placeholder="For example, confirm Thursday works and ask them to send the agenda."></textarea>
+          </div>
+          <div class="reply-actions">
+            <div class="pc-field">
+              <label class="pc-field__label" for="reply-engine">AI engine</label>
+              <select class="pc-input" id="reply-engine"></select>
+            </div>
+            <button class="pc-btn pc-btn--primary pc-btn--md" type="submit" id="draft-reply">
+              <span data-icon="wand"></span> Draft reply
+            </button>
+            <button class="pc-btn pc-btn--secondary pc-btn--md" type="button" id="cancel-draft" hidden>Cancel</button>
+          </div>
+          <p id="engine-hint" class="pc-field__hint">Provider requests ask for approval before sending the email and selected samples.</p>
+          <div id="reply-approval"></div>
+          <p id="reply-status" role="status" class="reply-status"></p>
+        </form>
+        <section class="reply-panel" aria-labelledby="result-heading">
+          <div class="reply-result-header">
+            <h2 id="result-heading"><label for="reply-result">Reply draft</label></h2>
+            <button class="pc-btn pc-btn--secondary pc-btn--sm" type="button" id="copy-reply" disabled>
+              <span data-icon="copy"></span> Copy reply
+            </button>
+          </div>
+          <textarea class="pc-input" id="reply-result" rows="8" placeholder="Your draft will appear here for you to review and edit."></textarea>
+          <p class="pc-field__hint">Paste your reviewed draft into your email app when it’s ready.</p>
+        </section>
+      </div>
+    </div>
+  </main>
+  <script type="module" src="email-reply.js"></script>
+</body>
+</html>

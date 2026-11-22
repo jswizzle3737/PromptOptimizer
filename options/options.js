@@ -1,19 +1,17 @@
 import {
-  getSettings, saveSettings, OPENROUTER_FREE_MODELS, PROVIDER_DEFAULTS,
+  getSettings, OPENROUTER_FREE_MODELS, PROVIDER_DEFAULTS,
   PROVIDER_MODEL_PRESETS, clampMaxHistory, normalizeBaseUrl,
-  getHistory, removeHistoryEntry, clearHistory
+  getHistory
 } from '../shared/storage.js';
 import { checkBuiltInPromptApiStatus, verifyProvider } from '../shared/optimizer-engine.js';
 import { NANO_SESSION_OPTIONS } from '../shared/nano.js';
 import { engineOptions, DEFAULT_ENGINE, ENGINE_LABELS } from '../shared/engines.js';
-import { isLocalEndpoint } from '../shared/secrets.js';
+import { writeUserData } from '../shared/run-client.js';
 import {
-  LIBRARY_KEY, LIMITS, getLibrary, saveToLibrary, updateLibraryEntry, deleteLibraryEntry,
+  LIBRARY_KEY, LIMITS, getLibrary,
   collectLabels, filterLibrary, normalizeLabels, deriveTitle
 } from '../shared/library.js';
-import {
-  getFrameworks, saveFrameworks, upsertFramework, deleteFramework, resetFrameworksToDefault
-} from '../shared/frameworks.js';
+import { getFrameworks } from '../shared/frameworks.js';
 import { createSelect, escapeHtml } from '../shared/select.js';
 import { createThemePicker, applyTheme, watchTheme, getTheme } from '../shared/theme-picker.js';
 import { icon, hydrateIcons, ICON_NAMES, hasIcon } from '../shared/icons.js';
@@ -121,37 +119,45 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   /* ----------------------------------------------------------- Dirty state */
-  function getFormState() {
+  function getSettingControls() {
     return {
-      preferredEngine: engineSelect.getValue(),
-      preferredFramework: frameworkSelect.getValue(),
-      fallback1Engine: fallback1.engineSelect.getValue(),
-      fallback1Model: el.fallback1Model.value.trim(),
-      fallback2Engine: fallback2.engineSelect.getValue(),
-      fallback2Model: el.fallback2Model.value.trim(),
-      allowCloudFallback: el.allowCloudFallback.checked,
-      geminiApiKey: el.geminiApiKey.value.trim(),
-      geminiModel: el.geminiModel.value.trim(),
-      openaiApiKey: el.openaiApiKey.value.trim(),
-      openaiModel: el.openaiModel.value.trim(),
-      anthropicApiKey: el.anthropicApiKey.value.trim(),
-      anthropicModel: el.anthropicModel.value.trim(),
-      openrouterApiKey: el.orApiKey.value.trim(),
-      openrouterModel: el.orModelInput.value.trim(),
-      omnirouteEnabled: el.omniEnabled.checked,
-      omnirouteBaseUrl: el.omniBaseUrl.value.trim(),
-      omnirouteApiKey: el.omniApiKey.value.trim(),
-      omnirouteModel: el.omniModelInput.value.trim(),
-      customSystemPrompt: el.customPrompt.value.trim(),
-      enableFloatingWidget: el.widgetToggle.checked,
-      quickRepairEnabled: el.quickRepairToggle.checked,
-      maxHistoryItems: el.maxHistory.value.trim()
+      preferredEngine: engineSelect,
+      preferredFramework: frameworkSelect,
+      fallback1Engine: fallback1.engineSelect,
+      fallback1Model: el.fallback1Model,
+      fallback2Engine: fallback2.engineSelect,
+      fallback2Model: el.fallback2Model,
+      allowCloudFallback: el.allowCloudFallback,
+      geminiApiKey: el.geminiApiKey,
+      geminiModel: el.geminiModel,
+      openaiApiKey: el.openaiApiKey,
+      openaiModel: el.openaiModel,
+      anthropicApiKey: el.anthropicApiKey,
+      anthropicModel: el.anthropicModel,
+      openrouterApiKey: el.orApiKey,
+      openrouterModel: el.orModelInput,
+      omnirouteEnabled: el.omniEnabled,
+      omnirouteBaseUrl: el.omniBaseUrl,
+      omnirouteApiKey: el.omniApiKey,
+      omnirouteModel: el.omniModelInput,
+      customSystemPrompt: el.customPrompt,
+      enableFloatingWidget: el.widgetToggle,
+      quickRepairEnabled: el.quickRepairToggle,
+      maxHistoryItems: el.maxHistory
     };
+  }
+
+  function getFormState() {
+    return Object.fromEntries(Object.entries(getSettingControls()).map(([key, control]) => {
+      if (control.getValue) return [key, control.getValue()];
+      if (control.type === 'checkbox') return [key, control.checked];
+      return [key, control.value.trim()];
+    }));
   }
 
   function syncDirtyState() {
     if (savedSnapshot === null) return;
-    isDirty = JSON.stringify(getFormState()) !== savedSnapshot;
+    isDirty = Object.entries(getFormState()).some(([key, value]) => savedSnapshot[key] !== value);
     el.saveStatus.classList.toggle('is-dirty', isDirty);
     el.saveStatusDot.classList.toggle('pc-status-dot--warning', isDirty);
     el.saveStatusDot.classList.toggle('pc-status-dot--success', !isDirty);
@@ -159,7 +165,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   function markClean() {
-    savedSnapshot = JSON.stringify(getFormState());
+    savedSnapshot = getFormState();
     syncDirtyState();
   }
 
@@ -178,7 +184,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     onChange: async id => {
       theme = id;
       applyTheme(document.documentElement, id);
-      await saveSettings({ theme: id });
+      await writeUserData('saveSettings', { theme: id });
       toast(`${getTheme(id).name} applied`);
     }
   });
@@ -384,16 +390,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     return { engineSelect: engineSelectSlot, presetSelect, syncControls };
   }
 
-  function isLocalSelection(eng) {
-    if (eng === 'nano' || eng === 'offline') return true;
-    if (eng !== 'omniroute') return false;
-    return isLocalEndpoint(el.omniBaseUrl.value.trim() || PROVIDER_DEFAULTS.omniroute.baseUrl);
-  }
-
   function updateFallbackHints() {
     const primary = engineSelect.getValue();
     const allowCloud = el.allowCloudFallback.checked;
-    const primaryLocal = isLocalSelection(primary);
     const fb1Eng = fallback1.engineSelect.getValue();
     const fb1Raw = el.fallback1Model.value.trim();
 
@@ -409,17 +408,15 @@ document.addEventListener('DOMContentLoaded', async () => {
         continue;
       }
       if (!eng) {
-        hintEl.textContent = allowCloud
-          ? 'Empty slot. Unlisted providers with saved keys still act as automatic backups.'
-          : 'Empty slot. Automatic cloud fallback is off.';
+        hintEl.textContent = 'Empty slot. Choose a provider or use the offline template.';
         continue;
       }
       if (eng === 'offline') {
         hintEl.textContent = 'Stops the fallback chain here and returns the offline template immediately.';
         continue;
       }
-      if (!allowCloud && primaryLocal && !isLocalSelection(eng)) {
-        hintEl.textContent = 'Skipped while cloud fallback is turned off below for local engines.';
+      if (!allowCloud && eng !== 'nano') {
+        hintEl.textContent = 'Skipped while cloud fallback is off.';
         continue;
       }
       if (API_KEY_FIELDS[eng] && !API_KEY_FIELDS[eng].value.trim()) {
@@ -447,10 +444,10 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
       }
       if (eng === 'omniroute') {
-        hintEl.textContent = `Routes via OmniRoute (${effModel}) when earlier engines fail, even if general OmniRoute auto-fallback is off.`;
+        hintEl.textContent = `Routes via OmniRoute (${effModel}) after you approve the destination.`;
         continue;
       }
-      hintEl.textContent = `Runs ${ENGINE_LABELS[eng] || eng} (${effModel}) if earlier engines fail.`;
+      hintEl.textContent = `Runs ${ENGINE_LABELS[eng] || eng} (${effModel}) after you approve the destination.`;
     }
   }
 
@@ -831,7 +828,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (!only) {
         del.addEventListener('click', async () => {
           if (!confirm(`Delete the "${fw.name}" optimizer type?`)) return;
-          await deleteFramework(fw.id);
+          await writeUserData('deleteFramework', fw.id);
           toast(`Deleted "${fw.name}"`);
           await refreshFrameworks();
           syncDirtyState();
@@ -896,7 +893,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         else merged.push(fw);
         imported++;
       }
-      await saveFrameworks(merged);
+      await writeUserData('saveFrameworks', merged);
       await refreshFrameworks();
       syncDirtyState();
       toast(`Imported ${imported} optimizer type${imported === 1 ? '' : 's'}`);
@@ -945,7 +942,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   el.resetFrameworksBtn.addEventListener('click', async () => {
     if (!confirm('Reset all optimizer types to the factory defaults? Custom edits will be lost.')) return;
-    await resetFrameworksToDefault();
+    await writeUserData('resetFrameworksToDefault');
     await refreshFrameworks();
     syncDirtyState();
     toast('Restored defaults');
@@ -962,7 +959,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') ||
       `custom-${Date.now()}`;
 
-    await upsertFramework({
+    await writeUserData('upsertFramework', {
       id,
       name,
       icon: fwIconSelect.getValue() || 'wand',
@@ -1091,7 +1088,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       card.querySelector('[data-action="edit"]').addEventListener('click', () => openPromptModal(entry));
       card.querySelector('[data-action="delete"]').addEventListener('click', async () => {
         if (!confirm(`Delete "${entry.title}" from your library?`)) return;
-        await deleteLibraryEntry(entry.id);
+        await writeUserData('deleteLibraryEntry', entry.id);
         toast(`Deleted "${entry.title}"`);
         await refreshLibrary();
       });
@@ -1146,7 +1143,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           continue;
         }
         seen.add(key);
-        await saveToLibrary({
+        await writeUserData('saveToLibrary', {
           title,
           text,
           original: String(item.original || '').trim(),
@@ -1252,8 +1249,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     libEl.saveBtn.disabled = true;
     try {
-      if (id) await updateLibraryEntry(id, fields);
-      else await saveToLibrary(fields);
+      if (id) await writeUserData('updateLibraryEntry', { id, patch: fields });
+      else await writeUserData('saveToLibrary', fields);
       closePromptModal();
       toast(id ? 'Prompt updated' : 'Prompt saved');
       await refreshLibrary();
@@ -1354,7 +1351,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
       card.querySelector('[data-action="save-library"]').addEventListener('click', async () => {
         try {
-          await saveToLibrary({
+          await writeUserData('saveToLibrary', {
             title: deriveTitle(entry.optimized || entry.original),
             text: entry.optimized || '',
             original: entry.original || '',
@@ -1370,7 +1367,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
       card.querySelector('[data-action="delete"]').addEventListener('click', async () => {
         if (!confirm('Delete this history entry?')) return;
-        await removeHistoryEntry(entry.id);
+        await writeUserData('removeHistoryEntry', entry.id);
         toast('History entry deleted');
         await refreshHistory();
       });
@@ -1392,7 +1389,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   el.clearHistoryBtn.addEventListener('click', async () => {
     if (!historyEntries.length) return;
     if (!confirm('Clear all recorded optimization history from this device?')) return;
-    await clearHistory();
+    await writeUserData('clearHistory');
     await refreshHistory();
     toast('History cleared');
   });
@@ -1567,79 +1564,43 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   /* --------------------------------------------------------------- Save */
   el.saveBtn.addEventListener('click', async () => {
-    const chosenEngine = engineSelect.getValue();
-    const fb1Engine = fallback1.engineSelect.getValue();
-    const fb2Engine = fallback2.engineSelect.getValue();
-    const rawOmniUrl = el.omniBaseUrl.value.trim();
-    const needsOmniPermission = chosenEngine === 'omniroute'
-      || fb1Engine === 'omniroute'
-      || fb2Engine === 'omniroute'
-      || el.omniEnabled.checked
-      || (Boolean(rawOmniUrl) && normalizeBaseUrl(rawOmniUrl) !== PROVIDER_DEFAULTS.omniroute.baseUrl);
-
-    try {
-      if (needsOmniPermission) {
-        el.omniBaseUrl.value = await ensureOriginPermission(rawOmniUrl || PROVIDER_DEFAULTS.omniroute.baseUrl);
-      } else if (rawOmniUrl && !normalizeBaseUrl(rawOmniUrl)) {
-        throw new Error('Enter a valid http:// or https:// OmniRoute Base URL.');
-      }
-    } catch (err) {
-      toast(err.message, 'danger');
-      return;
-    }
+    if (el.saveBtn.disabled) return;
+    const submitted = getFormState();
+    const patch = Object.fromEntries(Object.entries(submitted).filter(([key, value]) => savedSnapshot[key] !== value));
+    if (!Object.keys(patch).length) return;
 
     el.saveBtn.disabled = true;
-    el.saveBtn.innerHTML = `<span class="pc-spinner"></span><span>Saving…</span>`;
-
+    el.saveBtn.innerHTML = '<span class="pc-spinner"></span><span>Saving…</span>';
     try {
-      const clampedHistory = clampMaxHistory(el.maxHistory.value, 20);
-      const saved = await saveSettings({
-        preferredEngine: chosenEngine,
-        preferredFramework: frameworkSelect.getValue(),
-        fallback1Engine: fb1Engine,
-        fallback1Model: el.fallback1Model.value.trim(),
-        fallback2Engine: fb2Engine,
-        fallback2Model: el.fallback2Model.value.trim(),
-        allowCloudFallback: el.allowCloudFallback.checked,
-        theme,
-        geminiApiKey: el.geminiApiKey.value.trim(),
-        geminiModel: el.geminiModel.value.trim() || PROVIDER_DEFAULTS.gemini.model,
-        openaiApiKey: el.openaiApiKey.value.trim(),
-        openaiModel: el.openaiModel.value.trim() || PROVIDER_DEFAULTS.openai.model,
-        anthropicApiKey: el.anthropicApiKey.value.trim(),
-        anthropicModel: el.anthropicModel.value.trim() || PROVIDER_DEFAULTS.anthropic.model,
-        openrouterApiKey: el.orApiKey.value.trim(),
-        openrouterModel: el.orModelInput.value.trim() || PROVIDER_DEFAULTS.openrouter.model,
-        omnirouteEnabled: el.omniEnabled.checked,
-        omnirouteBaseUrl: normalizeBaseUrl(el.omniBaseUrl.value) || PROVIDER_DEFAULTS.omniroute.baseUrl,
-        omnirouteApiKey: el.omniApiKey.value.trim(),
-        omnirouteModel: el.omniModelInput.value.trim() || PROVIDER_DEFAULTS.omniroute.model,
-        customSystemPrompt: el.customPrompt.value.trim(),
-        enableFloatingWidget: el.widgetToggle.checked,
-        quickRepairEnabled: el.quickRepairToggle.checked,
-        maxHistoryItems: clampedHistory
-      });
-
-      el.geminiModel.value = saved.geminiModel;
-      el.openaiModel.value = saved.openaiModel;
-      el.anthropicModel.value = saved.anthropicModel;
-      el.orModelInput.value = saved.openrouterModel;
-      el.omniBaseUrl.value = saved.omnirouteBaseUrl;
-      el.omniModelInput.value = saved.omnirouteModel;
-      el.omniEnabled.checked = Boolean(saved.omnirouteEnabled);
-      el.maxHistory.value = String(saved.maxHistoryItems);
-      el.fallback1Model.value = saved.fallback1Model || '';
-      el.fallback2Model.value = saved.fallback2Model || '';
-      fallback1.engineSelect.setValue(saved.fallback1Engine || '', { silent: true });
-      fallback2.engineSelect.setValue(saved.fallback2Engine || '', { silent: true });
-
+      const gatewayChanged = ['preferredEngine', 'fallback1Engine', 'fallback2Engine', 'omnirouteEnabled', 'omnirouteBaseUrl']
+        .some(key => key in patch);
+      const gatewaySelected = [submitted.preferredEngine, submitted.fallback1Engine, submitted.fallback2Engine].includes('omniroute');
+      if (gatewayChanged && (gatewaySelected || submitted.omnirouteEnabled || (patch.omnirouteBaseUrl && patch.omnirouteBaseUrl !== PROVIDER_DEFAULTS.omniroute.baseUrl))) {
+        const normalized = await ensureOriginPermission(submitted.omnirouteBaseUrl || PROVIDER_DEFAULTS.omniroute.baseUrl);
+        if ('omnirouteBaseUrl' in patch) patch.omnirouteBaseUrl = normalized;
+      }
+      if ('maxHistoryItems' in patch) patch.maxHistoryItems = clampMaxHistory(patch.maxHistoryItems, 20);
+      for (const engine of ['gemini', 'openai', 'anthropic', 'openrouter', 'omniroute']) {
+        const field = engine + 'Model';
+        if (patch[field] === '') patch[field] = PROVIDER_DEFAULTS[engine].model;
+      }
+      const saved = await writeUserData('saveSettings', patch);
+      const current = getFormState();
+      for (const [key, control] of Object.entries(getSettingControls())) {
+        const value = saved[key];
+        savedSnapshot[key] = key === 'maxHistoryItems' ? String(value) : value;
+        if (current[key] !== submitted[key]) continue;
+        if (control.setValue) control.setValue(value, { silent: true });
+        else if (control.type === 'checkbox') control.checked = Boolean(value);
+        else control.value = value;
+      }
       geminiPreset.syncFromInput();
       openaiPreset.syncFromInput();
       anthropicPreset.syncFromInput();
       omniPreset.syncFromInput();
       refreshOpenRouterOptions();
       refreshFallbackSlots();
-      markClean();
+      syncDirtyState();
       toast('Settings saved');
     } catch (err) {
       toast(`Save failed: ${err.message}`, 'danger');

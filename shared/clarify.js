@@ -11,6 +11,24 @@ export const DEFAULT_CLARIFY_QUESTIONS = [
   'Anything it must include or avoid?'
 ];
 
+/** Cover concrete missing details for recognizable drafts without an AI engine. */
+export function getOfflineClarifyQuestions(text) {
+  const draft = String(text ?? '');
+  if (/\b(?:trip|vacation|itinerary|holiday)\b/i.test(draft)) {
+    const details = [
+      [/\b(?:destination|(?:trip|travel|vacation|holiday|itinerary)\s+(?:to|in|for)\s+(?!me\b|us\b)[a-z])/i,
+        'Where are you going?'],
+      [/\b(?:dates?|next (?:week|month|year)|\d+[- ](?:days?|weeks?|nights?)|jan(?:uary)?|feb(?:ruary)?|march|april|may|june|july|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b/i,
+        'What dates or duration should the itinerary cover?'],
+      [/\b(?:budget|usd|cad|eur)\b|[$€£]\s*\d/i,
+        'What is the total budget or daily spending range?']
+    ];
+    const questions = details.filter(([provided]) => !provided.test(draft)).map(([, question]) => question);
+    if (questions.length) return questions;
+  }
+  return DEFAULT_CLARIFY_QUESTIONS;
+}
+
 /** One question per line; numbering and bullets stripped; at most three. */
 export function parseQuestions(text) {
   return String(text ?? '')

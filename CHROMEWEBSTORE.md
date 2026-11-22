@@ -1,6 +1,6 @@
 # Chrome Web Store Listing — PromptOptimizer
 
-> Last Updated: 2026-10-02 · Manifest version: 1.1.0
+> Draft for PromptOptimizer 1.4.0 · Manifest V3
 >
 > Items marked **TODO (you supply)** need a real value before submission. They are placeholders on purpose; the review team checks them.
 
@@ -33,7 +33,7 @@ How to use:
 5. Click Insert to replace your draft with the improved prompt, or Copy.
 
 Privacy & Security:
-PromptOptimizer has no servers, analytics, or tracking. Your prompts, history, settings, and any API keys are stored only in your browser. With Chrome's on-device model or Offline templates, nothing is sent anywhere. If you choose a cloud provider, the prompt you ask it to optimize is sent directly to that provider with your own key, under that provider's terms. The extension never reads a field until you click the button, press the shortcut, or use the right-click menu, and it ignores password and other credential fields.
+PromptOptimizer has no servers, analytics, or tracking. History, settings, and API keys are stored in your browser. Chrome's on-device model and Offline templates process prompts locally. If you choose a cloud provider or gateway, it receives the text required for the action, including page context when enabled. Fallback providers are off by default. If you enable them and choose a provider, you review its destination before each send. The extension reads drafts when you invoke it and ignores password and other credential fields.
 
 **Category** [REQUIRED]
 Productivity
@@ -87,7 +87,7 @@ English
 
 **Does the extension collect user data?** The developer does not receive any user data.
 
-PromptOptimizer has no developer-operated server. Everything it stores stays in the browser. The text of a prompt leaves the device only when the user selects a cloud provider (Google, OpenAI, Anthropic, or OpenRouter) and runs an optimization; it then goes directly to that provider using the user's own API key.
+PromptOptimizer has no developer-operated server. It stores data in the browser. Request text is sent to the selected provider or gateway, or to a configured fallback destination after the user approves the send. This may include page context when enabled.
 
 | Data Type | Handled? | Transmitted Off-Device? | Purpose | Shared with Third Parties? |
 |---|---|---|---|---|
@@ -95,12 +95,14 @@ PromptOptimizer has no developer-operated server. Everything it stores stays in 
 | Health info | No | No | N/A | No |
 | Financial info | No | No | N/A | No |
 | Authentication info (API keys the user enters) | Stored locally | Only to the provider the key belongs to | Authenticating the user's own requests | Only to that provider |
-| Personal communications / website content (the draft the user chooses to optimize) | Read only on a user action (button, shortcut, right-click) | Only if the user selects a cloud engine; then only to that provider | Rewriting the prompt | Only to the provider the user selected |
+| Personal communications / website content (draft, rewrite, and optional page context) | Read on a user action | When the user selects a provider or approves a configured fallback | Rewriting, refining, or clarifying a prompt | The selected or approved provider or gateway |
 | Location | No | No | N/A | No |
 | Web history | No | No | N/A | No |
 | User activity | No | No | N/A | No |
 
 Recent optimizations (original and optimized text) are kept in the browser's local extension storage, up to a limit the user sets, and can be cleared from the popup. Prompts the user chooses to save, with their names and labels, are kept the same way, up to 500, and can be edited or deleted one by one from the options page.
+
+The Email replies workspace saves writing samples and style instructions in the browser when the user saves their writing style. Incoming emails and generated replies are kept in the workspace tab. Working with a provider or gateway requires approval before the workspace shares the incoming email, reply notes, style instructions, and selected writing samples.
 
 ### Data Use Certification
 - [x] Data is NOT sold to third parties
@@ -114,7 +116,7 @@ Recent optimizations (original and optimized text) are kept in the browser's loc
 **Privacy Policy URL**: **TODO (you supply)** — must be a live page that matches this section before submission.
 
 ### Summary
-PromptOptimizer is local-first. It has no servers, analytics, or trackers. Settings, history, and API keys are stored in the browser's extension storage (`chrome.storage.local`) and are never sent to the developer. Chrome's on-device model and the Offline templates make no network requests. A cloud provider receives a prompt only when the user selects that provider, and receives it directly from the user's browser under the user's own account.
+PromptOptimizer is local-first and has no servers, analytics, or trackers. Settings, history, and API keys are stored in browser extension storage. A selected provider or gateway receives the prompt and any additional text needed for the action, such as an edited rewrite, custom instruction, or opted-in page context. Cloud fallback is off by default. Each send to a configured fallback displays the destination and requires approval. The extension also pauses when it detects likely credentials in the outgoing text.
 
 ---
 
@@ -138,6 +140,7 @@ PromptOptimizer is local-first. It has no servers, analytics, or trackers. Setti
 
 | Version | Date | Changes | Status |
 |---|---|---|---|
+| 1.4.0 | 2026-11-21 | Adds email drafting with a saved writing style and selected samples. Adds approval before provider requests for email drafts and cloud fallback, preserves completed work when history storage fails, and turns off the site widget in open tabs. | Store draft |
 | 1.2.0 | 2026-10-14 | Cloud engines return their own rewrites again: a half-built "offline-first" mode had replaced every slow answer with the offline template. Rewrites stream as they are written, with Cancel. Cut-off answers are flagged with Continue. One-tap Shorter, More formal and Add examples refinements; Ask me first; optional page context; a warning before a draft holding credentials reaches a cloud provider. Saved prompts can hold {{variables}} and are listed in the popup and the in-page panel. A failed engine falls back to any other provider with a saved key before the offline template. Gemini Nano runs in an offscreen document, since the Prompt API is unavailable to service workers. First-run setup in the popup. The engine menu shows every engine. Grok, Copilot and Poe added. | Draft |
 | 1.1.0 | 2026-10-02 | Renamed to PromptOptimizer, with the yourlegalaid logo and wordmark at the top of the popup and options page. The Optimize button now runs only on the listed AI chat sites; any other site is opt-in, one site at a time. Password and credential fields are never read. Alt+O is a remappable browser command and also works on any page; the right-click item now works on an empty text field. The default engine is Chrome's on-device model; the shared developer API key that earlier builds carried has been removed, and stored copies are cleared on update. Chrome's on-device model was rewritten against the current API. Every engine now receives the draft in the same delimited form, so models rewrite it rather than answer it. Requests time out after 45 seconds and fall back visibly. The Offline templates pick personas by whole words. Provider model defaults updated; Gemini keys moved out of the URL. Framework chips wrap instead of hiding options behind an invisible scroll; unified the action verb on "Optimize"; engine failures surface as a visible offline fallback instead of reporting success; ten interface designs to choose from, each with its own palette, type and corners; a library of saved prompts with names and labels; icon set replaces emoji; first-run guidance moved inline to the popup. | Draft |
 | 1.0.0 | 2026-09-12 | Initial Manifest V3 build with In-Page Shadow DOM widget, multi-framework optimizer, Chrome Gemini Nano support, BYOK integrations, and offline templates. Never published. | Draft |
