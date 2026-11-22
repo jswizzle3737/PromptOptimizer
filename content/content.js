@@ -2837,6 +2837,7 @@
     const pageObserver = new MutationObserver(scheduleScan);
 
     function setSiteAvailable(enabled) {
+      if (origin === 'https://mail.google.com') enabled = false;
       siteAvailable = enabled;
       if (enabled) {
         ensureHost();

@@ -10,7 +10,8 @@ import {
   optimizePrompt, refinePrompt, clarifyPrompt, repairPrompt, draftEmailReply,
   setNanoBackend, setNanoJudgeBackend, CancelledError
 } from '../shared/optimizer-engine.js';
-import { nanoBridge } from './nano-bridge.js';
+import { nanoBridge, readSavedEmailStyle } from './nano-bridge.js';
+import { GMAIL_ORIGIN } from '../shared/email-draft.js';
 import { isEngine } from '../shared/engines.js';
 import { detectSecrets } from '../shared/secrets.js';
 import {
@@ -141,15 +142,17 @@ function toOrigin(value) {
 async function registerSite(origin) {
   const id = SITE_SCRIPT_PREFIX + origin;
   const existing = await chrome.scripting.getRegisteredContentScripts({ ids: [id] });
-  if (existing.length) return;
-  await chrome.scripting.registerContentScripts([{
+  const gmail = origin === GMAIL_ORIGIN;
+  const config = {
     id,
     matches: [`${origin}/*`],
-    js: ['content/content.js'],
-    css: ['content/content.css'],
+    js: [gmail ? 'content/gmail-replies.js' : 'content/content.js'],
+    css: gmail ? [] : ['content/content.css'],
     runAt: 'document_idle',
     persistAcrossSessions: true
-  }]);
+  };
+  if (!existing.length) await chrome.scripting.registerContentScripts([config]);
+  else if (existing[0].js?.[0] !== config.js[0]) await chrome.scripting.updateContentScripts([config]);
 }
 
 /**
@@ -195,8 +198,9 @@ async function enableSite(rawOrigin, tabId) {
   // page the user is looking at as well.
   if (tabId != null) {
     try {
-      await chrome.scripting.insertCSS({ target: { tabId }, files: ['content/content.css'] });
-      await chrome.scripting.executeScript({ target: { tabId }, files: ['content/content.js'] });
+      const gmail = origin === GMAIL_ORIGIN;
+      if (!gmail) await chrome.scripting.insertCSS({ target: { tabId }, files: ['content/content.css'] });
+      await chrome.scripting.executeScript({ target: { tabId }, files: [gmail ? 'content/gmail-replies.js' : 'content/content.js'] });
     } catch (err) {
       console.warn('Could not inject into the current tab; it will apply on reload:', err);
     }
@@ -254,8 +258,13 @@ async function runFromSender(payload, sender, controller, io = {}) {
  */
 async function runRequest(payload = {}, sender, io = {}) {
   const { action = 'optimize', text, frameworkId, engine, host, context, variantCount, kind, previous, instruction } = payload;
-  const email = action === 'draft-email';
-  if (email && sender?.url !== chrome.runtime.getURL('options/email-reply.html')) {
+  const gmail = action === 'draft-gmail';
+  const email = action === 'draft-email' || gmail;
+  if (gmail && (sender?.frameId !== 0 || toOrigin(sender.tab?.url) !== GMAIL_ORIGIN ||
+      toOrigin(sender.url) !== GMAIL_ORIGIN || !(await getSites()).includes(GMAIL_ORIGIN))) {
+    throw new Error('Enable the reply star on Gmail from the PromptOptimizer toolbar.');
+  }
+  if (action === 'draft-email' && sender?.url !== chrome.runtime.getURL('options/email-reply.html')) {
     throw new Error('Open Email replies from the extension to draft a reply.');
   }
   /* The host tunes the rewrite for the target model. Prefer the sender tab's
@@ -274,6 +283,11 @@ async function runRequest(payload = {}, sender, io = {}) {
     }
   };
 
+  if (gmail) {
+    const profile = await readSavedEmailStyle(io.signal);
+    const samples = (profile?.samples || []).filter(sample => sample?.selected).map(sample => sample.text);
+    return draftEmailReply({ email: payload.email, notes: payload.notes, instructions: profile?.instructions, samples }, common);
+  }
   if (email) return draftEmailReply(payload, common);
 
   if (action === 'clarify') {

@@ -952,7 +952,7 @@ async function runWithFallback(engine, settings, run, io = {}) {
 export async function draftEmailReply(input, io = {}) {
   const task = buildEmailDraftTask(input);
   const settings = await getSettings();
-  const engine = input.engine || DEFAULT_ENGINE;
+  const engine = input.engine || (settings.preferredEngine === 'offline' ? DEFAULT_ENGINE : settings.preferredEngine);
   if (engine === 'offline') throw new Error('Choose an AI engine to draft a personalized reply.');
   const { value, engine: usedEngine, model, fallbackReason } = await runWithFallback(
     engine, settings,

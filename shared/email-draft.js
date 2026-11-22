@@ -1,3 +1,6 @@
+export const GMAIL_ORIGIN = 'https://mail.google.com';
+export const EMAIL_STYLE_KEY = 'promptoptimizer.emailStyle.v1';
+
 export const EMAIL_LIMITS = {
   email: 12000,
   instructions: 3000,

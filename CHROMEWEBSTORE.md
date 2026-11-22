@@ -104,6 +104,8 @@ Recent optimizations (original and optimized text) are kept in the browser's loc
 
 The Email replies workspace saves writing samples and style instructions in the browser when the user saves their writing style. Incoming emails and generated replies are kept in the workspace tab. Working with a provider or gateway requires approval before the workspace shares the incoming email, reply notes, style instructions, and selected writing samples.
 
+The optional Gmail reply star reads the visible conversation and text in the reply box after the user clicks it. It uses the saved writing style and inserts a draft for review in Gmail. The user sends the reply through Gmail.
+
 ### Data Use Certification
 - [x] Data is NOT sold to third parties
 - [x] Data is NOT used for purposes unrelated to the extension's core functionality

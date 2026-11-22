@@ -1,4 +1,4 @@
-import { EMAIL_LIMITS } from '../shared/email-draft.js';
+import { EMAIL_LIMITS, EMAIL_STYLE_KEY } from '../shared/email-draft.js';
 import { ENGINES, ENGINE_LABELS } from '../shared/engines.js';
 import { getSettings } from '../shared/storage.js';
 import { applyTheme, watchTheme } from '../shared/theme-picker.js';
@@ -6,7 +6,6 @@ import { hydrateIcons } from '../shared/icons.js';
 import { createSendNotice } from '../shared/assist.js';
 import { startRun } from '../shared/run-client.js';
 
-const profileKey = 'promptoptimizer.emailStyle.v1';
 const byId = id => document.getElementById(id);
 const style = byId('style-instructions');
 const files = byId('sample-files');
@@ -67,7 +66,7 @@ function renderSamples() {
 }
 
 try {
-  const saved = JSON.parse(localStorage.getItem(profileKey) || 'null');
+  const saved = JSON.parse(localStorage.getItem(EMAIL_STYLE_KEY) || 'null');
   if (saved) {
     if (typeof saved.instructions === 'string') style.value = saved.instructions.slice(0, EMAIL_LIMITS.instructions);
     if (Array.isArray(saved.samples)) {
@@ -118,7 +117,7 @@ files.addEventListener('change', async () => {
 
 byId('save-style').addEventListener('click', () => {
   try {
-    localStorage.setItem(profileKey, JSON.stringify({ instructions: style.value.trim(), samples }));
+    localStorage.setItem(EMAIL_STYLE_KEY, JSON.stringify({ instructions: style.value.trim(), samples }));
     status(styleStatus, 'Writing style saved on this browser.');
   } catch {
     status(styleStatus, 'Could not save your writing style. Free some browser storage and try again.', true);
