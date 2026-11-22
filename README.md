@@ -15,6 +15,7 @@
   <a href="#-15-accessible-design-themes"><img src="https://img.shields.io/badge/Accessibility-WCAG%20AA%20Contrast-2EC4B6?style=for-the-badge&logo=w3c&logoColor=white" alt="WCAG AA Compliant"></a>
   <a href="#-project-architecture"><img src="https://img.shields.io/badge/Dependencies-0%20(Pure%20Vanilla)-FF9F1C?style=for-the-badge" alt="Zero Dependencies"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-06D6A0?style=for-the-badge" alt="MIT License"></a>
+  <a href="https://github.com/jswizzle3737/PromptOptimizer/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/jswizzle3737/PromptOptimizer/ci.yml?branch=main&style=for-the-badge&label=CI" alt="CI status"></a>
 </p>
 
 <p align="center">
