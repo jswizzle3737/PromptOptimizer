@@ -7,7 +7,7 @@ import {
 } from '../shared/optimizer-engine.js';
 
 const RAW = 'make me a website';
-const settings = (extra = {}) => ({ promptcraft_settings: { schemaVersion: 4, variantCount: 1, ...extra } });
+const settings = (extra = {}) => ({ promptcraft_settings: { schemaVersion: 6, variantCount: 1, ...extra } });
 
 const originalFetch = globalThis.fetch;
 beforeEach(() => { delete globalThis.LanguageModel; setNanoBackend(null); });
@@ -113,7 +113,7 @@ test('streaming with variants is skipped: tagged replies are never streamed', as
 });
 
 test('onStart fires for the primary engine and again for each fallback', async () => {
-  installChromeStub(settings({ preferredEngine: 'openai', openaiApiKey: 'BAD', geminiApiKey: 'G' }));
+  installChromeStub(settings({ preferredEngine: 'openai', openaiApiKey: 'BAD', geminiApiKey: 'G', allowCloudFallback: true, fallback1Engine: 'gemini' }));
   stubFetch(url => url.includes('openai.com')
     ? jsonResponse({ error: { message: 'bad key' } }, 401)
     : sseResponse([{ candidates: [{ content: { parts: [{ text: 'From Gemini' }] } }] }]));
@@ -121,6 +121,13 @@ test('onStart fires for the primary engine and again for each fallback', async (
   const r = await optimizePrompt(RAW, { onToken: () => {}, onStart: e => starts.push(e) });
   assert.deepEqual(starts, ['openai', 'gemini']);
   assert.equal(r.optimized, 'From Gemini');
+});
+
+test('offline clarification asks for missing trip details and skips supplied details', async () => {
+  const missing = await clarifyPrompt('Plan a trip', { engine: 'offline' });
+  assert.match(missing.questions.join(' '), /where.*dates.*budget/i);
+  const halfway = await clarifyPrompt('Plan a trip to Lisbon for 5 days', { engine: 'offline' });
+  assert.deepEqual(halfway.questions, ['What is the total budget or daily spending range?']);
 });
 
 /* ------------------------------------------------------------- truncation */

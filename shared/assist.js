@@ -6,7 +6,7 @@
  *                        refinements (Shorter, More formal, Add examples)
  *   createClarifySheet   "Ask me first": up to three questions, answered
  *                        before the rewrite runs
- *   createSecretNotice   a warning before a draft holding credentials is sent
+ *   createSendNotice     approval for fallback destinations and suspected credentials
  *                        to a cloud provider
  *   createLibraryPicker  saved prompts, searchable, with a fill-in form for
  *                        {{variables}}
@@ -269,10 +269,10 @@ export function createClarifySheet({ onSubmit, onCancel, idPrefix = 'pc-clarify'
 /* ------------------------------------------------------------------ */
 
 /**
- * Shown instead of sending. "Send anyway" calls `onSendAnyway`; editing the
- * draft is the other way out.
+ * Resolve the current request only after a user action. A web page cannot
+ * approve a request by synthesizing a click in the in-page panel.
  */
-export function createSecretNotice({ onSendAnyway } = {}) {
+export function createSendNotice({ labelForEngine } = {}) {
   const root = document.createElement('div');
   root.className = 'pc-callout pc-callout--danger pc-secret-notice';
   root.setAttribute('role', 'alert');
@@ -280,23 +280,58 @@ export function createSecretNotice({ onSendAnyway } = {}) {
   root.innerHTML = `
     <span class="pc-callout__icon">${icon('lock', { size: 15 })}</span>
     <div class="pc-callout__body">
-      <span class="pc-callout__title">Possible secret in your draft</span>
+      <span class="pc-callout__title"></span>
       <span class="pc-callout__text"></span>
       <button type="button" class="pc-btn pc-btn--ghost pc-btn--sm pc-btn--danger-text" data-act="send">Send anyway</button>
+      <button type="button" class="pc-btn pc-btn--ghost pc-btn--sm" data-act="cancel">Cancel</button>
     </div>
   `;
   const text = root.querySelector('.pc-callout__text');
-  root.querySelector('[data-act="send"]').addEventListener('click', () => {
+  const title = root.querySelector('.pc-callout__title');
+  const send = root.querySelector('[data-act="send"]');
+  const cancel = root.querySelector('[data-act="cancel"]');
+  let resolveApproval = null;
+  let returnFocus = null;
+
+  function settle(approved) {
     root.hidden = true;
-    onSendAnyway?.();
+    const resolve = resolveApproval;
+    resolveApproval = null;
+    if (returnFocus?.isConnected) returnFocus.focus({ preventScroll: true });
+    returnFocus = null;
+    resolve?.(approved);
+  }
+
+  send.addEventListener('click', event => {
+    if (event.isTrusted) settle(true);
+  });
+  cancel.addEventListener('click', () => settle(false));
+  root.addEventListener('keydown', event => {
+    if (event.key !== 'Escape') return;
+    event.preventDefault();
+    event.stopPropagation();
+    settle(false);
   });
   return {
     element: root,
-    show(message) {
-      text.textContent = `${message} Remove it, or send anyway.`;
+    ask({ engine, model, origin, secrets = [], fallback, email }) {
+      settle(false);
+      const provider = labelForEngine?.(engine) || engine;
+      const destination = [provider, model, origin].filter(Boolean).join(' · ');
+      title.textContent = secrets.length ? 'Possible credential in this request'
+        : email ? 'Draft with this provider?' : 'Send to the fallback provider?';
+      let message = fallback ? `Your selected engine failed. The next provider is ${destination}.` : `Destination is ${destination}.`;
+      if (email) message += ' This sends the incoming email, your notes and style instructions, and the samples you selected.';
+      if (secrets.length) message += ` The request may contain ${secrets.join(', ')}.`;
+      text.textContent = message;
+      send.textContent = secrets.length ? 'Send anyway' : email ? 'Approve and draft' : 'Send to fallback';
+      returnFocus = root.getRootNode().activeElement;
       root.hidden = false;
+      cancel.focus({ preventScroll: true });
+      root.scrollIntoView({ block: 'nearest' });
+      return new Promise(resolve => { resolveApproval = resolve; });
     },
-    hide() { root.hidden = true; }
+    hide() { settle(false); }
   };
 }
 

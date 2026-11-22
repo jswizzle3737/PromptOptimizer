@@ -12,7 +12,7 @@ const SYSTEM = 'You rewrite prompts.';
 const RAW = 'make me a website';
 
 function settings(extra = {}) {
-  return { promptcraft_settings: { schemaVersion: 5, ...extra } };
+  return { promptcraft_settings: { schemaVersion: 6, ...extra } };
 }
 
 const originalFetch = globalThis.fetch;
@@ -346,10 +346,8 @@ test('sendProviderRequest retries on network error', async () => {
 
 /* ------------------------------------------------------------- fallback */
 
-/* Nano is the default but missing on many machines. A saved provider key
-   must be used before the offline template, and the result must say so. */
-test('an unavailable Nano falls back to a provider with a saved key', async () => {
-  installChromeStub(settings({ preferredEngine: 'nano', openaiApiKey: 'K', openaiModel: 'm' }));
+test('an unavailable Nano falls back to the explicitly configured provider', async () => {
+  installChromeStub(settings({ preferredEngine: 'nano', openaiApiKey: 'K', openaiModel: 'm', allowCloudFallback: true, fallback1Engine: 'openai' }));
   stubFetch(() => jsonResponse({ choices: [{ message: { content: 'From OpenAI' } }] }));
 
   const r = await optimizePrompt(RAW);
@@ -361,8 +359,8 @@ test('an unavailable Nano falls back to a provider with a saved key', async () =
   assert.equal(r.optimized, 'From OpenAI');
 });
 
-test('a failing provider falls back to the next keyed provider, skipping itself', async () => {
-  installChromeStub(settings({ preferredEngine: 'openai', openaiApiKey: 'BAD', geminiApiKey: 'G' }));
+test('a failing provider falls back to the named provider', async () => {
+  installChromeStub(settings({ preferredEngine: 'openai', openaiApiKey: 'BAD', geminiApiKey: 'G', allowCloudFallback: true, fallback1Engine: 'gemini' }));
   const calls = stubFetch(url => url.includes('openai.com')
     ? jsonResponse({ error: { message: 'Incorrect API key provided' } }, 401)
     : jsonResponse({ candidates: [{ content: { parts: [{ text: 'From Gemini' }] } }] }));
@@ -376,8 +374,8 @@ test('a failing provider falls back to the next keyed provider, skipping itself'
   assert.equal(calls.filter(c => c.url.includes('openai.com')).length, 1, '401 is not retried');
 });
 
-test('with no other keyed provider the offline template is used and marked degraded', async () => {
-  installChromeStub(settings({ preferredEngine: 'nano' }));
+test('unlisted providers with saved keys are skipped even when the fallback switch is on', async () => {
+  installChromeStub(settings({ preferredEngine: 'nano', allowCloudFallback: true, openaiApiKey: 'K' }));
   const calls = stubFetch(() => { throw new Error('no provider should be called'); });
 
   const r = await optimizePrompt(RAW);
@@ -431,7 +429,7 @@ test('omniroute: optimizes keyless when chosen explicitly and participates in fa
   assert.equal(rSkipped.degraded, true);
   assert.equal(skipped.length, 0);
 
-  installChromeStub(settings({ preferredEngine: 'nano', omnirouteEnabled: true }));
+  installChromeStub(settings({ preferredEngine: 'nano', allowCloudFallback: true, fallback1Engine: 'omniroute' }));
   stubFetch(() => jsonResponse({ choices: [{ message: { content: 'Fallback via gateway' } }] }));
   const rFallback = await optimizePrompt(RAW);
   assert.equal(rFallback.engine, 'omniroute');
@@ -532,6 +530,7 @@ test('same-provider fallback retries the same engine with Fallback 1 model overr
     openaiApiKey: 'K',
     openaiModel: 'gpt-4.1',
     fallback1Engine: 'openai',
+    allowCloudFallback: true,
     fallback1Model: 'gpt-4o-mini'
   }));
   const calls = stubFetch((url, init) => {
@@ -558,13 +557,14 @@ test('same-provider fallback retries the same engine with Fallback 1 model overr
   assert.deepEqual(starts, [['openai', 'gpt-4.1'], ['openai', 'gpt-4o-mini']]);
 });
 
-test('fallback chain deduplicates identical (engine, model) slots and skips seenEngines in auto-fallback', async () => {
+test('fallback chain deduplicates identical (engine, model) slots and skips unlisted providers', async () => {
   // Exact duplicate (openai, gpt-4.1) in Fallback 1 is skipped before Fallback 2 (gemini).
   installChromeStub(settings({
     preferredEngine: 'openai',
     openaiApiKey: 'K',
     openaiModel: 'gpt-4.1',
     fallback1Engine: 'openai',
+    allowCloudFallback: true,
     fallback1Model: 'gpt-4.1',
     fallback2Engine: 'gemini',
     fallback2Model: 'gemini-2.5-pro',
@@ -584,12 +584,13 @@ test('fallback chain deduplicates identical (engine, model) slots and skips seen
   assert.ok(calls[0].url.includes('api.openai.com'));
   assert.ok(calls[1].url.includes('gemini-2.5-pro'));
 
-  // Same-provider fallback fails on alternate model: auto-fallback tries keyed Gemini once, never retries OpenAI.
+  // A saved Gemini key does not make Gemini an eligible backup.
   installChromeStub(settings({
     preferredEngine: 'openai',
     openaiApiKey: 'K',
     openaiModel: 'gpt-4.1',
     fallback1Engine: 'openai',
+    allowCloudFallback: true,
     fallback1Model: 'gpt-4o-mini',
     geminiApiKey: 'G'
   }));
@@ -600,10 +601,10 @@ test('fallback chain deduplicates identical (engine, model) slots and skips seen
     return jsonResponse({ candidates: [{ content: { parts: [{ text: 'Auto Gemini output' }] } }] });
   });
   const r2 = await optimizePrompt(RAW, { nanoJudge: false, scoreRetry: false });
-  assert.equal(r2.engine, 'gemini');
+  assert.equal(r2.engine, 'offline');
   assert.deepEqual(
     calls2.map(c => (c.url.includes('api.openai.com') ? JSON.parse(c.init.body).model : 'gemini')),
-    ['gpt-4.1', 'gpt-4o-mini', 'gemini']
+    ['gpt-4.1', 'gpt-4o-mini']
   );
 });
 
@@ -614,6 +615,7 @@ test('cross-provider Fallback 1 -> Fallback 2 order overrides PROVIDERS declarat
     openaiApiKey: 'O',
     anthropicApiKey: 'A',
     fallback1Engine: 'anthropic',
+    allowCloudFallback: true,
     fallback1Model: 'claude-sonnet-4-6',
     fallback2Engine: 'openai',
     fallback2Model: 'gpt-4o-mini'
@@ -641,6 +643,7 @@ test('offline circuit breaker in Fallback 1 or Fallback 2 halts later slots and 
     openaiApiKey: 'K',
     geminiApiKey: 'G',
     anthropicApiKey: 'A',
+    allowCloudFallback: true,
     fallback1Engine: 'offline',
     fallback2Engine: 'anthropic'
   }));
@@ -656,6 +659,7 @@ test('offline circuit breaker in Fallback 1 or Fallback 2 halts later slots and 
     geminiApiKey: 'G',
     anthropicApiKey: 'A',
     fallback1Engine: 'anthropic',
+    allowCloudFallback: true,
     fallback2Engine: 'offline'
   }));
   const calls2 = stubFetch(() => jsonResponse({ error: { message: 'bad model' } }, 404));
@@ -667,7 +671,7 @@ test('offline circuit breaker in Fallback 1 or Fallback 2 halts later slots and 
   assert.ok(calls2[1].url.includes('api.anthropic.com'));
 });
 
-test('explicit OmniRoute slot runs keyless when disabled and allowCloudFallback blocks cloud while keeping localhost', async () => {
+test('explicit OmniRoute slot runs keyless and disabled fallback blocks all gateway requests', async () => {
   // Explicit remote OmniRoute works even when omnirouteEnabled: false and keyless.
   installChromeStub(settings({
     preferredEngine: 'nano',
@@ -686,7 +690,7 @@ test('explicit OmniRoute slot runs keyless when disabled and allowCloudFallback 
   assert.equal(calls1[0].url, 'https://gateway.example.com/v1/chat/completions');
   assert.equal(JSON.parse(calls1[0].init.body).model, 'auto/coding:free');
 
-  // allowCloudFallback: false from Nano skips cloud Fallback 1 but allows local OmniRoute Fallback 2.
+  // A local gateway may relay the prompt remotely, so it also requires opt-in.
   installChromeStub(settings({
     preferredEngine: 'nano',
     allowCloudFallback: false,
@@ -700,11 +704,9 @@ test('explicit OmniRoute slot runs keyless when disabled and allowCloudFallback 
   }));
   const calls2 = stubFetch(() => jsonResponse({ choices: [{ message: { content: 'Local OmniRoute fallback' } }] }));
   const r2 = await optimizePrompt(RAW, { nanoJudge: false, scoreRetry: false });
-  assert.equal(r2.degraded, false);
-  assert.equal(r2.engine, 'omniroute');
-  assert.equal(r2.model, 'auto/fast:free');
-  assert.equal(calls2.length, 1);
-  assert.equal(calls2[0].url, 'http://localhost:20128/v1/chat/completions');
+  assert.equal(r2.degraded, true);
+  assert.equal(r2.engine, 'offline');
+  assert.equal(calls2.length, 0);
 
   // allowCloudFallback: false from Nano skips explicit remote OmniRoute fallback too.
   installChromeStub(settings({
@@ -728,6 +730,7 @@ test('refinePrompt, clarifyPrompt, and scoreRetry preserve fallback model overri
     openaiApiKey: 'K',
     openaiModel: 'gpt-4.1',
     fallback1Engine: 'openai',
+    allowCloudFallback: true,
     fallback1Model: 'gpt-4o-mini'
   }));
   stubFetch((url, init) => {
@@ -748,6 +751,7 @@ test('refinePrompt, clarifyPrompt, and scoreRetry preserve fallback model overri
     openaiModel: 'gpt-4.1',
     anthropicApiKey: 'A',
     fallback1Engine: 'anthropic',
+    allowCloudFallback: true,
     fallback1Model: 'claude-haiku-4-5'
   }));
   stubFetch(url => {
@@ -767,6 +771,7 @@ test('refinePrompt, clarifyPrompt, and scoreRetry preserve fallback model overri
     openaiApiKey: 'K',
     openaiModel: 'gpt-4.1',
     fallback1Engine: 'openai',
+    allowCloudFallback: true,
     fallback1Model: 'gpt-4o-mini'
   }));
   let openAiAttempt = 0;

@@ -1,18 +1,17 @@
 import {
-  getSettings, saveSettings, getHistory, clearHistory, getSites, takePendingPrompt, PROVIDER_DEFAULTS
+  getSettings, getHistory, getSites, takePendingPrompt, PROVIDER_DEFAULTS
 } from '../shared/storage.js';
 import { getFrameworks } from '../shared/frameworks.js';
 import { createSelect, escapeHtml } from '../shared/select.js';
 import { createThemeMenu, applyTheme, watchTheme, getTheme } from '../shared/theme-picker.js';
 import { icon, hydrateIcons } from '../shared/icons.js';
 import { engineOptions, ENGINE_LABELS, DEFAULT_ENGINE } from '../shared/engines.js';
-import { saveToLibrary, getLibrary, collectLabels, deriveTitle } from '../shared/library.js';
+import { getLibrary, collectLabels, deriveTitle } from '../shared/library.js';
 import { createSaveSheet } from '../shared/save-sheet.js';
-import { startRun } from '../shared/run-client.js';
-import { secretWarning } from '../shared/secrets.js';
+import { startRun, writeUserData } from '../shared/run-client.js';
 import { withAnswers } from '../shared/clarify.js';
 import {
-  createResultActions, createClarifySheet, createSecretNotice, createLibraryPicker,
+  createResultActions, createClarifySheet, createSendNotice, createLibraryPicker,
   createUndoStack, bindEditableResult
 } from '../shared/assist.js';
 import { checkBuiltInPromptApiStatus, verifyProvider } from '../shared/optimizer-engine.js';
@@ -97,9 +96,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     variantCount: 1,
     variants: [],
     /* The full result on screen (null for a library prompt or history). */
-    lastData: null,
-    /* Draft the user chose to send despite the credential warning. */
-    secretAllowedFor: ''
+    lastData: null
   };
 
   const SESSION_KEY = 'promptcraft_popup_session';
@@ -174,7 +171,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     onChange: async id => {
       state.theme = id;
       applyTheme(document.documentElement, id);
-      await saveSettings({ theme: id });
+      await writeUserData('saveSettings', { theme: id });
       toast(`${getTheme(id).name} design`, 'success');
     }
   });
@@ -198,7 +195,7 @@ document.addEventListener('DOMContentLoaded', async () => {
        every other site — a per-run choice silently reverted to Nano there. */
     onChange: async v => {
       state.engine = v;
-      await saveSettings({ preferredEngine: v });
+      await writeUserData('saveSettings', { preferredEngine: v });
     }
   });
   state.engine = engineSelect.getValue();
@@ -218,7 +215,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     label: 'Rewrite variants',
     onChange: async v => {
       state.variantCount = parseInt(v, 10) || 1;
-      await saveSettings({ variantCount: state.variantCount });
+      await writeUserData('saveSettings', { variantCount: state.variantCount });
     }
   });
   el.variantSlot.appendChild(variantSelect.element);
@@ -303,7 +300,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     state.resultFramework = '';
     state.lastData = null;
     state.variants = [];
-    state.secretAllowedFor = '';
     undoStack.clear();
     editableCtrl.setEditable(false);
     el.resultText.textContent = '';
@@ -396,7 +392,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         el.techChips.hidden = true;
         if (state.latest) {
           const rule = scorePrompt(state.latest, { traitIds: contractTraitIds(state.resultFramework || state.framework) });
-          renderQualityChip({ before: null, after: rule.score, missed: rule.missed, method: 'rules' }, state.original);
+          renderQualityChip({ before: null, after: rule.score, missed: rule.missed, method: 'rules' });
         } else {
           el.qualityChip.hidden = true;
         }
@@ -458,7 +454,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     clearTimeout(clearTimer);
     clearArmed = false;
     el.clearHistoryBtn.textContent = 'Clear all';
-    await clearHistory();
+    await writeUserData('clearHistory');
     await renderHistory();
     toast('History cleared', 'success');
   });
@@ -526,24 +522,20 @@ document.addEventListener('DOMContentLoaded', async () => {
     el.techChips.hidden = false;
   }
 
-  /* Quality chip: rule-based rubric before → after, optionally refined by the
+  /* Framework coverage chip: rule-based rubric before → after, optionally refined by the
      on-device judge. Advisory only — never blocks a result. */
-  function renderQualityChip(score, rawText) {
-    const after = score?.after;
+  function renderQualityChip(score) {
+    const after = score?.ruleScore ?? score?.after;
     if (typeof after !== 'number') {
       el.qualityChip.hidden = true;
       return;
     }
     const before = typeof score?.before === 'number' ? score.before : null;
-    el.qualityChip.textContent = before != null ? `Quality ${before}→${after}` : `Quality ${after}/100`;
-    const bits = [];
-    if (score.method === 'nano+rules') bits.push(`on-device judge ${score.judgeScore} + rules ${score.ruleScore}`);
-    else if (score.method === 'nano') bits.push('judged on-device');
-    else bits.push('rule-based check');
+    el.qualityChip.textContent = before != null ? `Framework coverage ${before}→${after}` : `Quality ${after}/100`;
+    const bits = ['Checks which framework elements are present', 'Use Ask me first to identify missing details'];
     if (Array.isArray(score.missed) && score.missed.length) {
       bits.push(`not shown: ${score.missed.map(t => t.label).join(', ')}`);
     }
-    if (rawText) bits.push(`draft: ${rawText.slice(0, 120)}`);
     el.qualityChip.title = bits.join(' · ');
     el.qualityChip.className = 'pc-badge pc-badge--mono ' +
       (after >= 80 ? 'pc-badge--success' : after >= 55 ? 'pc-badge--accent' : 'pc-badge--warning');
@@ -552,7 +544,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   /* The "before" half of the quality chip; kept across variant switches and manual edits. */
   function scoreBefore() {
-    const m = el.qualityChip.textContent.match(/Quality (\d+)/);
+    const m = el.qualityChip.textContent.match(/Framework coverage (\d+)/);
     return m ? parseInt(m[1], 10) : null;
   }
 
@@ -611,10 +603,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
     renderVariantChips();
     renderTechChips(state.lastData?.techniques);
-    if (state.lastData?.score) renderQualityChip(state.lastData.score, state.original);
+    if (state.lastData?.score) renderQualityChip(state.lastData.score);
     else if (state.latest) {
       const rule = scorePrompt(state.latest, { traitIds: contractTraitIds(state.resultFramework || state.framework) });
-      renderQualityChip({ before: snap.scoreBefore ?? null, after: rule.score, missed: rule.missed, method: 'rules' }, state.original);
+      renderQualityChip({ before: snap.scoreBefore ?? null, after: rule.score, missed: rule.missed, method: 'rules' });
     } else {
       el.qualityChip.hidden = true;
     }
@@ -634,7 +626,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       const rule = scorePrompt(editedText, {
         traitIds: contractTraitIds(state.resultFramework || state.framework)
       });
-      renderQualityChip({ before: scoreBefore(), after: rule.score, missed: rule.missed, method: 'rules' }, state.original);
+      renderQualityChip({ before: scoreBefore(), after: rule.score, missed: rule.missed, method: 'rules' });
       renderVariantChips();
       updateClearDraftVisibility();
       resultActions.update({ ...actionState(), busy: state.busy });
@@ -668,7 +660,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (state.lastData) state.lastData = { ...state.lastData, optimized: state.latest };
         el.resultText.textContent = variant.text;
         renderVariantChips();
-        renderQualityChip({ before: scoreBefore(), after: variant.score, method: 'rules' }, state.original);
+        renderQualityChip({ before: scoreBefore(), after: variant.score, method: 'rules' });
         resultActions.update({ ...actionState(), busy: state.busy });
         scheduleSessionSave();
       });
@@ -758,7 +750,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     el.engineBadge.className = 'pc-badge pc-badge--mono ' +
       (data.degraded ? 'pc-badge--warning' : 'pc-badge--accent');
     el.engineBadge.hidden = !data.engine;
-    renderQualityChip(data.score, state.original);
+    renderQualityChip(data.score);
     renderVariantChips();
     renderTechChips(data.techniques);
 
@@ -807,6 +799,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         toast(data.refinement ? 'Prompt refined' : 'Prompt optimized', 'success');
       }
     }
+    if (data.historyWarning) toast(data.historyWarning, 'neutral');
     editableCtrl.setEditable(Boolean(state.latest && !state.busy));
     updateClearDraftVisibility();
     resultActions.update(actionState());
@@ -856,6 +849,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (base) paint(base);
 
     currentRun = startRun({ ...payload, engine: state.engine, frameworkId: state.framework }, {
+      onApproval: reviewSend,
       onStart: (engine, model) => {
         streamed = base;
         const label = ENGINE_LABELS[engine] || engine;
@@ -918,6 +912,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       toast(err.message, 'danger');
     } finally {
       stopWaitTimer();
+      secretNotice.hide();
       el.resultText.classList.remove('is-streaming');
       currentRun = null;
       setBusy(false);
@@ -930,15 +925,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (!el.contextToggle.checked) return '';
     const tab = await activeTab();
     if (!tab?.url || !/^https?:/.test(tab.url)) return '';
-    return [`Page title: ${tab.title || ''}`, `URL: ${tab.url}`].join('\n');
-  }
-
-  /** A credential in the draft stops the run until the user says so. */
-  async function blockedBySecret(text) {
-    const warning = secretWarning(text, state.engine, await getSettings());
-    if (!warning || state.secretAllowedFor === text) return false;
-    secretNotice.show(warning);
-    return true;
+    const url = new URL(tab.url);
+    return [`Page title: ${tab.title || ''}`, `URL: ${url.origin}${url.pathname}`].join('\n');
   }
 
   async function optimize() {
@@ -948,7 +936,6 @@ document.addEventListener('DOMContentLoaded', async () => {
       el.rawPrompt.focus();
       return;
     }
-    if (await blockedBySecret(text)) return;
     const host = (await activeTabHost()) || state.host || null;
     state.host = host;
     await refreshTargetBadge();
@@ -966,13 +953,17 @@ document.addEventListener('DOMContentLoaded', async () => {
     optimize();
   });
 
-  const secretNotice = createSecretNotice({
-    onSendAnyway: () => {
-      state.secretAllowedFor = el.rawPrompt.value.trim();
-      optimize();
-    }
-  });
+  const secretNotice = createSendNotice({ labelForEngine: engine => ENGINE_LABELS[engine] });
   el.secretSlot.appendChild(secretNotice.element);
+  el.rawPrompt.addEventListener('input', () => secretNotice.hide());
+
+  async function reviewSend(details) {
+    stopWaitTimer();
+    setStatus('Waiting for your approval', 'warning');
+    const approved = await secretNotice.ask(details);
+    if (approved) setStatus('Sending request…', 'neutral');
+    return approved;
+  }
 
   /* Ask me first: questions, then the rewrite with the answers folded in. */
   const clarifySheet = createClarifySheet({
@@ -994,28 +985,29 @@ document.addEventListener('DOMContentLoaded', async () => {
       el.rawPrompt.focus();
       return;
     }
-    if (state.busy || await blockedBySecret(text)) return;
-    el.askFirstBtn.disabled = true;
+    if (state.busy) return;
+    setBusy(true);
     setStatus('Thinking of questions…', 'neutral');
     try {
-      const res = await startRun({ action: 'clarify', text, engine: state.engine }).promise;
-      if (!res) return;
-      clarifySheet.open(res.questions, res.degraded
-        ? 'General questions: no AI engine was reachable to tailor them.'
-        : '');
+      currentRun = startRun({ action: 'clarify', text, engine: state.engine }, { onApproval: reviewSend });
+      const res = await currentRun.promise;
+      if (!res) { setStatus('Cancelled', 'neutral'); return; }
+      clarifySheet.open(res.questions, res.engine === 'offline' ? 'Questions suggested on this device.' : '');
       setStatus('Ready', 'neutral');
     } catch (err) {
       setStatus('Failed', 'danger');
       toast(err.message, 'danger');
     } finally {
-      el.askFirstBtn.disabled = state.busy;
+      secretNotice.hide();
+      currentRun = null;
+      setBusy(false);
     }
   });
 
   /* Page context: opt-in, remembered. */
   el.contextToggle.checked = Boolean(settings.includePageContext);
   el.contextToggle.addEventListener('change', () =>
-    saveSettings({ includePageContext: el.contextToggle.checked }));
+    writeUserData('saveSettings', { includePageContext: el.contextToggle.checked }));
 
   el.rawPrompt.addEventListener('keydown', e => {
     if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
@@ -1023,7 +1015,6 @@ document.addEventListener('DOMContentLoaded', async () => {
       el.optimizeBtn.click();
     }
   });
-  el.rawPrompt.addEventListener('input', () => secretNotice.hide());
 
   /* ------------------------------------------------------------- Library */
   /* Saved prompts, with a fill-in form for {{variables}}. The chosen text
@@ -1106,7 +1097,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     if (nanoStatus?.available) {
       el.setupCard.hidden = true;
-      await saveSettings({ setupDismissed: true });
+      await writeUserData('saveSettings', { setupDismissed: true });
       return;
     }
 
@@ -1162,7 +1153,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     el.setupSaveBtn.textContent = 'Testing…';
     try {
       await verifyProvider(provider, { apiKey: key, model: PROVIDER_DEFAULTS[provider]?.model });
-      await saveSettings({ [`${provider}ApiKey`]: key, preferredEngine: provider });
+      await writeUserData('saveSettings', { [`${provider}ApiKey`]: key, preferredEngine: provider });
       state.engine = provider;
       engineSelect.setValue(provider, { silent: true });
       el.setupKey.value = '';
@@ -1178,7 +1169,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   el.setupDismissBtn.addEventListener('click', async () => {
     el.setupCard.hidden = true;
-    await saveSettings({ setupDismissed: true });
+    await writeUserData('saveSettings', { setupDismissed: true });
   });
 
   /* Downloading Nano needs a user gesture: this click. */
@@ -1203,7 +1194,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       });
       try { session?.destroy?.(); } catch {}
       nanoStatus = { available: true, status: 'available' };
-      await saveSettings({ preferredEngine: 'nano', setupDismissed: true });
+      await writeUserData('saveSettings', { preferredEngine: 'nano', setupDismissed: true });
       state.engine = 'nano';
       engineSelect.setValue('nano', { silent: true });
       setStatus('On-device model ready', 'success');
@@ -1249,7 +1240,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     idPrefix: 'popup-save',
     getSuggestions: async () => collectLabels(await getLibrary()),
     onSave: async ({ title, labels }) => {
-      await saveToLibrary({
+      await writeUserData('saveToLibrary', {
         title,
         labels,
         text: state.latest,
@@ -1359,7 +1350,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   async function finishOnboarding() {
     setOnboardingVisible(false);
-    await saveSettings({ onboardingComplete: true });
+    await writeUserData('saveSettings', { onboardingComplete: true });
     await refreshSetupCard();
     el.rawPrompt.focus();
   }

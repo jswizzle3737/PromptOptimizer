@@ -7,15 +7,17 @@
  */
 
 import {
-  optimizePrompt, refinePrompt, clarifyPrompt, repairPrompt, setNanoBackend, setNanoJudgeBackend, CancelledError
+  optimizePrompt, refinePrompt, clarifyPrompt, repairPrompt, draftEmailReply,
+  setNanoBackend, setNanoJudgeBackend, CancelledError
 } from '../shared/optimizer-engine.js';
 import { nanoBridge } from './nano-bridge.js';
 import { isEngine } from '../shared/engines.js';
+import { detectSecrets } from '../shared/secrets.js';
 import {
-  DEFAULT_SETTINGS, addHistoryEntry, getSettings, saveSettings, getSites, setPendingPrompt, SITES_KEY,
-  migrateTheme
+  addHistoryEntry, removeHistoryEntry, clearHistory, saveSettings, getSites, setPendingPrompt, SITES_KEY, migrateTheme
 } from '../shared/storage.js';
-import { saveToLibrary, getLibrary, collectLabels } from '../shared/library.js';
+import { saveToLibrary, updateLibraryEntry, deleteLibraryEntry, getLibrary, collectLabels } from '../shared/library.js';
+import { saveFrameworks, upsertFramework, deleteFramework, resetFrameworksToDefault } from '../shared/frameworks.js';
 
 const MENU_ID = 'promptcraft-optimize-selection';
 
@@ -26,6 +28,7 @@ if (chrome.offscreen) {
 }
 
 const SITE_SCRIPT_PREFIX = 'promptcraft-site-';
+const activeSiteRuns = new Map();
 
 /* ---------------------------------------------------------------------- */
 /* Install / startup                                                       */
@@ -41,14 +44,7 @@ chrome.runtime.onInstalled.addListener(async () => {
     contexts: ['selection', 'editable']
   });
 
-  const stored = await chrome.storage.local.get('promptcraft_settings');
-  if (!stored.promptcraft_settings) {
-    await chrome.storage.local.set({ promptcraft_settings: DEFAULT_SETTINGS });
-  } else {
-    // Run the stored settings through the schema migration now, so an update
-    // clears the retired credential immediately rather than on first use.
-    await getSettings();
-  }
+  await saveSettings({});
 
   /* Deliberately NOT opening the Options page on install.
      A settings console is not a welcome — it greets a first-time user with API
@@ -57,12 +53,12 @@ chrome.runtime.onInstalled.addListener(async () => {
      user chooses an engine that needs a key. */
 
   // Dynamically registered scripts do not reliably survive an extension update.
-  await syncSiteScripts();
+  await writeUserData(syncSiteScripts);
 });
 
-chrome.runtime.onStartup.addListener(() => syncSiteScripts());
+chrome.runtime.onStartup.addListener(() => writeUserData(syncSiteScripts));
 
-chrome.permissions.onRemoved.addListener(() => syncSiteScripts());
+chrome.permissions.onRemoved.addListener(() => writeUserData(syncSiteScripts));
 
 /* ---------------------------------------------------------------------- */
 /* Opening the optimizer                                                   */
@@ -168,6 +164,9 @@ async function syncSiteScripts() {
   }
   if (granted.length !== sites.length) {
     await chrome.storage.local.set({ [SITES_KEY]: granted });
+    for (const origin of sites) {
+      if (!granted.includes(origin)) cancelSiteRuns(origin);
+    }
   }
 
   const wanted = new Set(granted.map(o => SITE_SCRIPT_PREFIX + o));
@@ -189,8 +188,8 @@ async function enableSite(rawOrigin, tabId) {
     throw new Error('Permission for this site was not granted.');
   }
   const sites = await getSites();
-  if (!sites.includes(origin)) await chrome.storage.local.set({ [SITES_KEY]: [...sites, origin] });
   await registerSite(origin);
+  if (!sites.includes(origin)) await chrome.storage.local.set({ [SITES_KEY]: [...sites, origin] });
 
   // Registration only affects pages loaded from now on; put the button on the
   // page the user is looking at as well.
@@ -210,6 +209,10 @@ async function disableSite(rawOrigin) {
   if (!origin) throw new Error('Not a web page.');
   const sites = await getSites();
   await chrome.storage.local.set({ [SITES_KEY]: sites.filter(o => o !== origin) });
+  cancelSiteRuns(origin);
+  const tabs = await chrome.tabs.query({ url: `${origin}/*` }).catch(() => []);
+  await Promise.allSettled(tabs.filter(tab => tab.id != null).map(tab =>
+    chrome.tabs.sendMessage(tab.id, { type: 'OPTIMIZER_SITE_DISABLED', origin })));
   try {
     await chrome.permissions.remove({ origins: [`${origin}/*`] });
   } catch {
@@ -224,6 +227,26 @@ async function disableSite(rawOrigin) {
 /* Optimization requests                                                   */
 /* ---------------------------------------------------------------------- */
 
+function cancelSiteRuns(origin) {
+  for (const controller of activeSiteRuns.get(origin) || []) controller.abort();
+}
+
+async function runFromSender(payload, sender, controller, io = {}) {
+  const origin = sender?.tab ? toOrigin(sender.url || sender.tab.url) : null;
+  let runs;
+  if (origin) {
+    runs = activeSiteRuns.get(origin) || new Set();
+    activeSiteRuns.set(origin, runs);
+    runs.add(controller);
+  }
+  try {
+    return await runRequest(payload, sender, { ...io, signal: controller.signal });
+  } finally {
+    runs?.delete(controller);
+    if (runs?.size === 0) activeSiteRuns.delete(origin);
+  }
+}
+
 /**
  * Run one request from the popup or a page.
  * payload.action: 'optimize' (default) | 'refine' | 'clarify' | 'repair'.
@@ -231,32 +254,51 @@ async function disableSite(rawOrigin) {
  */
 async function runRequest(payload = {}, sender, io = {}) {
   const { action = 'optimize', text, frameworkId, engine, host, context, variantCount, kind, previous, instruction } = payload;
+  const email = action === 'draft-email';
+  if (email && sender?.url !== chrome.runtime.getURL('options/email-reply.html')) {
+    throw new Error('Open Email replies from the extension to draft a reply.');
+  }
   /* The host tunes the rewrite for the target model. Prefer the sender tab's
      own URL (content script) — a popup can only claim a host, the active tab
      is what it actually shows. */
   const senderHost = (() => {
     try { return new URL(sender?.tab?.url || '').hostname; } catch { return null; }
   })();
-  const common = { frameworkId, engine, host: senderHost || host, ...io };
+  const common = {
+    frameworkId, engine, host: senderHost || host, ...io,
+    async beforeSend({ engine: destination, model, origin, fallback, systemPrompt, userMessage }) {
+      const secrets = [...new Set([...detectSecrets(systemPrompt), ...detectSecrets(userMessage)])];
+      if (!email && !fallback && !secrets.length) return;
+      const approved = await io.requestApproval?.({ engine: destination, model, origin, fallback, secrets, ...(email && { email }) });
+      if (!approved || io.signal?.aborted) throw new CancelledError();
+    }
+  };
+
+  if (email) return draftEmailReply(payload, common);
 
   if (action === 'clarify') {
-    return clarifyPrompt(text, { engine, signal: io.signal, onStart: io.onStart, onStatus: io.onStatus });
+    return clarifyPrompt(text, common);
   }
   if (action === 'repair') {
-    return repairPrompt(text, { engine, signal: io.signal, onStart: io.onStart, onStatus: io.onStatus });
+    return repairPrompt(text, common);
   }
 
   const result = action === 'refine'
     ? await refinePrompt(text, { ...common, kind, previous, instruction })
     : await optimizePrompt(text, { ...common, context, variantCount });
 
-  await addHistoryEntry({
-    original: text,
-    optimized: result.optimized,
-    engine: result.engine,
-    framework: result.framework,
-    degraded: result.degraded
-  });
+  if (io.signal?.aborted) throw new CancelledError();
+  try {
+    await writeUserData(() => addHistoryEntry({
+      original: text,
+      optimized: result.optimized,
+      engine: result.engine,
+      framework: result.framework,
+      degraded: result.degraded
+    }));
+  } catch {
+    return { ...result, historyWarning: 'The rewrite is ready. It could not be saved to history.' };
+  }
   return result;
 }
 
@@ -274,13 +316,33 @@ chrome.runtime.onConnect.addListener(port => {
   const ctl = new AbortController();
   port.onDisconnect.addListener(() => ctl.abort());
   const post = m => { try { port.postMessage(m); } catch { /* caller closed */ } };
+  let started = false;
+  let approvalId = 0;
+  let pendingApproval = null;
+  ctl.signal.addEventListener('abort', () => pendingApproval?.resolve(false), { once: true });
+
+  function requestApproval(details) {
+    if (ctl.signal.aborted) return false;
+    return new Promise(resolve => {
+      const id = ++approvalId;
+      pendingApproval = { id, resolve };
+      post({ type: 'approval', id, details });
+    });
+  }
 
   port.onMessage.addListener(async msg => {
     if (msg?.type === 'cancel') { ctl.abort(); return; }
-    if (msg?.type !== 'start') return;
+    if (msg?.type === 'approval' && pendingApproval?.id === msg.id) {
+      const { resolve } = pendingApproval;
+      pendingApproval = null;
+      resolve(msg.approved === true);
+      return;
+    }
+    if (msg?.type !== 'start' || started) return;
+    started = true;
     try {
-      const data = await runRequest(msg.payload, port.sender, {
-        signal: ctl.signal,
+      const data = await runFromSender(msg.payload, port.sender, ctl, {
+        requestApproval,
         onToken: delta => post({ type: 'token', delta }),
         onStart: (engine, model) => post({ type: 'start', engine, ...(model && { model }) }),
         onStatus: info => post({ ...(info || {}), kind: info?.type || 'status', type: 'status' })
@@ -298,22 +360,50 @@ chrome.runtime.onConnect.addListener(port => {
 /* Message dispatcher                                                      */
 /* ---------------------------------------------------------------------- */
 
-/** Messages only extension pages may send. A content script has `sender.tab`. */
-const PAGE_ONLY = new Set(['ENABLE_SITE', 'DISABLE_SITE']);
+/** Messages only extension pages may send, including Options opened as a tab. */
+const PAGE_ONLY = new Set(['ENABLE_SITE', 'DISABLE_SITE', 'WRITE_USER_DATA']);
 const PORT_ACTIONS = new Set(['optimize', 'refine', 'clarify', 'repair']);
+
+let writes = Promise.resolve();
+function writeUserData(operation) {
+  const result = writes.then(operation);
+  writes = result.catch(() => {});
+  return result;
+}
+
+const USER_WRITES = new Map([
+  ['saveSettings', patch => saveSettings(patch)],
+  ['clearHistory', () => clearHistory()],
+  ['removeHistoryEntry', id => removeHistoryEntry(id)],
+  ['saveToLibrary', entry => saveToLibrary(entry)],
+  ['updateLibraryEntry', ({ id, patch }) => updateLibraryEntry(id, patch)],
+  ['deleteLibraryEntry', id => deleteLibraryEntry(id)],
+  ['saveFrameworks', frameworks => saveFrameworks(frameworks)],
+  ['upsertFramework', framework => upsertFramework(framework)],
+  ['deleteFramework', id => deleteFramework(id)],
+  ['resetFrameworksToDefault', () => resetFrameworksToDefault()]
+]);
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   (async () => {
     try {
-      if (PAGE_ONLY.has(message.type) && sender.tab) {
+      if (PAGE_ONLY.has(message.type) && sender.tab && !sender.url?.startsWith(chrome.runtime.getURL(''))) {
         throw new Error('Not allowed from a web page.');
       }
 
       switch (message.type) {
+        case 'WRITE_USER_DATA': {
+          const operation = USER_WRITES.get(message.operation);
+          if (!operation) throw new Error('Unknown storage operation.');
+          const data = await writeUserData(() => operation(message.payload));
+          sendResponse({ success: true, data });
+          break;
+        }
+
         case 'OPTIMIZE_PROMPT': {
           // One-shot form of the 'optimize' port below, without streaming.
           const action = PORT_ACTIONS.has(message.payload?.action) ? message.payload.action : 'optimize';
-          const data = await runRequest({ ...message.payload, action }, sender);
+          const data = await runFromSender({ ...message.payload, action }, sender, new AbortController());
           sendResponse({ success: true, data });
           break;
         }
@@ -321,7 +411,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         case 'SET_THEME': {
           // The in-page panel's design picker. Normalised here, so a page cannot
           // store an arbitrary value, and written as one field.
-          const saved = await saveSettings({ theme: migrateTheme(message.payload?.theme) });
+          const saved = await writeUserData(() => saveSettings({ theme: migrateTheme(message.payload?.theme) }));
           sendResponse({ success: true, theme: saved.theme });
           break;
         }
@@ -330,14 +420,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           // The in-page panel's variant-count picker. Clamped here for the same
           // reason SET_THEME normalises: a page never stores arbitrary values.
           const count = Math.max(1, Math.min(3, parseInt(message.payload?.count, 10) || 1));
-          const saved = await saveSettings({ variantCount: count });
+          const saved = await writeUserData(() => saveSettings({ variantCount: count }));
           sendResponse({ success: true, variantCount: saved.variantCount });
           break;
         }
 
         case 'SET_PAGE_CONTEXT': {
           // The in-page panel's "Use page context" switch: one boolean field.
-          const saved = await saveSettings({ includePageContext: message.payload?.enabled === true });
+          const saved = await writeUserData(() => saveSettings({ includePageContext: message.payload?.enabled === true }));
           sendResponse({ success: true, includePageContext: saved.includePageContext });
           break;
         }
@@ -353,7 +443,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           const patch = engineId === 'omniroute'
             ? { preferredEngine: engineId, omnirouteEnabled: true }
             : { preferredEngine: engineId };
-          const saved = await saveSettings(patch);
+          const saved = await writeUserData(() => saveSettings(patch));
           sendResponse({ success: true, preferredEngine: saved.preferredEngine });
           break;
         }
@@ -367,7 +457,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         case 'SAVE_PROMPT': {
           // From the in-page modal, which has no direct route to the library.
           const { title, text, original, labels, framework, engine } = message.payload || {};
-          const entry = await saveToLibrary({ title, text, original, labels, framework, engine });
+          const entry = await writeUserData(() => saveToLibrary({ title, text, original, labels, framework, engine }));
           sendResponse({ success: true, id: entry.id });
           break;
         }
@@ -377,18 +467,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           break;
 
         case 'ENABLE_SITE':
-          sendResponse({ success: true, origin: await enableSite(message.origin, message.tabId) });
+          sendResponse({ success: true, origin: await writeUserData(() => enableSite(message.origin, message.tabId)) });
           break;
 
         case 'DISABLE_SITE':
-          sendResponse({ success: true, origin: await disableSite(message.origin) });
+          sendResponse({ success: true, origin: await writeUserData(() => disableSite(message.origin)) });
           break;
 
         default:
           sendResponse({ success: false, error: `Unknown message type: ${message.type}` });
       }
     } catch (err) {
-      console.error('Service worker error handling message:', message, err);
+      console.error('Service worker error handling message:', message.type, err);
       sendResponse({ success: false, error: err.message });
     }
   })();

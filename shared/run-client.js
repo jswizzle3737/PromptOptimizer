@@ -8,7 +8,7 @@
  * fallback engine or model: the caller discards any text streamed so far.
  * `onStatus(info)` reports transient retry states (e.g. 429 rate-limit backoff).
  */
-export function startRun(payload, { onStart, onToken, onStatus } = {}) {
+export function startRun(payload, { onStart, onToken, onStatus, onApproval } = {}) {
   const port = chrome.runtime.connect({ name: 'optimize' });
   let settled = false;
   let resolveRun;
@@ -26,6 +26,12 @@ export function startRun(payload, { onStart, onToken, onStatus } = {}) {
     if (msg?.type === 'start') onStart?.(msg.engine, msg.model);
     else if (msg?.type === 'token') onToken?.(msg.delta);
     else if (msg?.type === 'status') onStatus?.(msg);
+    else if (msg?.type === 'approval') {
+      Promise.resolve().then(() => onApproval?.(msg.details)).then(
+        approved => replyToApproval(msg.id, approved === true),
+        () => replyToApproval(msg.id, false)
+      );
+    }
     else if (msg?.type === 'done') finish(resolveRun, msg.data);
     else if (msg?.type === 'cancelled') finish(resolveRun, null);
     else if (msg?.type === 'error') finish(rejectRun, new Error(msg.error));
@@ -34,6 +40,11 @@ export function startRun(payload, { onStart, onToken, onStatus } = {}) {
     finish(rejectRun, new Error('The extension stopped responding. Reload the page and try again.')));
   port.postMessage({ type: 'start', payload });
 
+  function replyToApproval(id, approved) {
+    if (settled) return;
+    try { port.postMessage({ type: 'approval', id, approved }); } catch { /* already closed */ }
+  }
+
   return {
     promise,
     cancel() {
@@ -41,4 +52,11 @@ export function startRun(payload, { onStart, onToken, onStatus } = {}) {
       try { port.postMessage({ type: 'cancel' }); } catch { /* already closed */ }
     }
   };
+}
+
+/** Mutations from extension pages share the service worker's write queue. */
+export async function writeUserData(operation, payload) {
+  const response = await chrome.runtime.sendMessage({ type: 'WRITE_USER_DATA', operation, payload });
+  if (!response?.success) throw new Error(response?.error || 'Could not save locally.');
+  return response.data;
 }

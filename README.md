@@ -136,7 +136,7 @@ PromptOptimizer guards your sensitive credentials before drafts ever touch a rem
 - AWS access keys, GitHub personal access tokens, OpenAI/Anthropic API keys
 - Private keys (`BEGIN RSA PRIVATE KEY`, etc.)
 - Database connection strings and hardcoded passwords
-- Drafts containing detected secrets are immediately paused with an explicit confirmation dialog before dispatch.
+- The extension checks outgoing drafts, page context, edited rewrites, and custom instructions for likely credentials. It asks for approval before sending a flagged request.
 
 ### 4. 📚 Prompt Library & `{{variable}}` Templates
 - **Template Variables**: Create re-usable prompts containing dynamic parameters like `{{client_name}}`, `{{jurisdiction}}`, or `{{deadline}}`.
@@ -151,6 +151,10 @@ PromptOptimizer guards your sensitive credentials before drafts ever touch a rem
 
 ---
 
+## Email replies
+
+Open **Email replies** from the toolbar popup or Settings. Upload up to five UTF-8 text or Markdown samples and save them with your writing instructions. Paste an incoming email, add any points to include, and review and copy the draft. The workspace saves your writing style locally. If you use an AI provider or gateway, you approve sharing the email and the selected style material before it is sent.
+
 ## 🤖 Supported AI Engines
 
 | Engine | Type | Privacy | Latency | Key Required? |
@@ -162,7 +166,7 @@ PromptOptimizer guards your sensitive credentials before drafts ever touch a rem
 | **OpenRouter** | Cloud Multi-Model | 🔑 Secure Direct API | ⚡ Streaming | BYOK (Access 200+ models) |
 | **Offline Templates** | Rule-Based | 🔒 100% Offline | ⚡ 0ms Instant | None (Instant fallback) |
 
-> **Graceful Fallback:** If your selected cloud provider runs into a network error or rate limit, PromptOptimizer gracefully falls back to any configured alternative key, or drops down to the offline heuristic template while clearly notifying you of the source.
+> **Fallback:** The offline template is the default backup for rewrites. In Settings, you can enable provider fallback and choose up to two destinations. PromptOptimizer asks before sending to each fallback provider.
 
 ---
 
