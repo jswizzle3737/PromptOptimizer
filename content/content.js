@@ -67,264 +67,6 @@
     { id: 'concise', name: 'Concise', icon: 'minimize' }
   ];
 
-  /* Surface-specific layout only — all color comes from tokens. */
-  const SURFACE_CSS = `
-    /* Isolates the widget from host-page typography. Shadow DOM blocks
-       page selectors, but inherited properties still cascade from the host. */
-    .pc-root {
-      font-family: var(--font-sans);
-      font-size: var(--text-base);
-      line-height: var(--leading-normal);
-      color: var(--text-primary);
-      letter-spacing: var(--tracking-normal);
-      -webkit-font-smoothing: antialiased;
-    }
-    .pc-root *, .pc-root *::before, .pc-root *::after { box-sizing: border-box; }
-
-    .pc-quick-send-notice {
-      position: fixed;
-      inset: auto 12px 12px auto;
-      width: min(380px, calc(100vw - 24px));
-      pointer-events: auto;
-    }
-
-    .pc-star-btn {
-      position: fixed;
-      pointer-events: auto;
-      display: none;
-      align-items: center;
-      justify-content: center;
-      width: 34px;
-      height: 34px;
-      padding: 0;
-      /* Solid accent, like the brand mark: a translucent dark chip vanished on
-         dark chat pages (about 1:1 contrast against #212121). */
-      background: var(--accent);
-      color: var(--text-on-accent);
-      border: 1px solid transparent;
-      border-radius: var(--radius-full);
-      box-shadow: var(--shadow-2);
-      cursor: pointer;
-      user-select: none;
-      z-index: 2147483646;
-      transition:
-        background-color var(--dur-fast) var(--ease-standard),
-        border-color var(--dur-fast) var(--ease-standard),
-        color var(--dur-fast) var(--ease-standard),
-        transform var(--dur-fast) var(--ease-standard),
-        box-shadow var(--dur-fast) var(--ease-standard);
-    }
-    .pc-star-btn:hover {
-      background: var(--accent-hover);
-      transform: translateY(-1px) scale(1.04);
-    }
-    .pc-star-btn:active { transform: translateY(0) scale(0.98); }
-    .pc-star-btn:focus-visible {
-      outline: 2px solid var(--border-focus);
-      outline-offset: 2px;
-    }
-    .pc-star-btn.is-busy .pc-spinner {
-      width: 15px;
-      height: 15px;
-    }
-    .pc-star-btn.is-busy svg {
-      animation: pc-star-pulse 1.1s var(--ease-standard) infinite;
-    }
-    /* Undo state: outlined, so it reads as different from "enhance". */
-    .pc-star-btn.is-revert,
-    .pc-star-btn.is-revert:hover {
-      background: var(--bg-raised);
-      border: 2px solid var(--success);
-      color: var(--success-fg);
-    }
-    @keyframes pc-star-pulse {
-      0%, 100% { transform: scale(1) rotate(0deg); opacity: 1; }
-      50% { transform: scale(0.84) rotate(22deg); opacity: 0.65; }
-    }
-
-    .pc-toast { z-index: 2147483647; }
-    .pc-toast.has-action { pointer-events: auto; }
-    .pc-toast__action {
-      margin-left: var(--space-1);
-      padding: 2px var(--space-2);
-      border-radius: var(--radius-full);
-      border: 1px solid var(--accent-border);
-      background: var(--accent-soft);
-      color: var(--accent-fg);
-      font-size: var(--text-xs);
-      font-weight: var(--weight-semibold);
-      cursor: pointer;
-      transition: background-color var(--dur-fast) var(--ease-standard);
-    }
-    .pc-toast__action:hover { background: var(--accent-soft-hover); }
-
-    .pc-backdrop {
-      position: fixed;
-      inset: 0;
-      pointer-events: auto;
-      display: none;
-      align-items: center;
-      justify-content: center;
-      padding: var(--space-6);
-      z-index: 2147483647;
-      background: var(--bg-overlay);
-    }
-    .pc-backdrop.is-open { display: flex; }
-
-    .pc-modal {
-      display: flex;
-      flex-direction: column;
-      width: 640px;
-      max-width: 100%;
-      /* A definite height, so the output box can fill down to the footer instead
-         of stopping at whatever height its text happens to need. */
-      height: min(720px, calc(100vh - var(--space-10)));
-      background: var(--bg-surface);
-      border: 1px solid var(--border-default);
-      border-radius: var(--radius-xl);
-      box-shadow: var(--shadow-3);
-      overflow: hidden;
-      animation: pc-modal-in var(--dur-base) var(--ease-decelerate);
-    }
-
-    .pc-modal__header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: var(--space-4);
-      flex-shrink: 0;
-      height: 52px;
-      padding: 0 var(--space-4) 0 var(--space-5);
-      border-bottom: 1px solid var(--border-subtle);
-    }
-
-    .pc-modal__brand { display: flex; align-items: center; gap: var(--space-3); }
-
-    .pc-modal__logo {
-      display: block;
-      height: 26px;
-      width: auto;
-      filter: var(--logo-filter);
-    }
-
-    .pc-modal__title-row {
-      display: flex;
-      align-items: center;
-      gap: var(--space-2);
-    }
-
-    .pc-modal__title {
-      font-size: var(--text-md);
-      font-weight: var(--weight-semibold);
-      letter-spacing: var(--tracking-tight);
-      color: var(--text-primary);
-    }
-
-    .pc-modal__subtitle {
-      display: block;
-      font-size: var(--text-xs);
-      color: var(--text-tertiary);
-      font-weight: var(--weight-normal);
-    }
-
-    .pc-modal__actions { display: flex; align-items: center; gap: var(--space-2); }
-    .pc-modal__theme .pc-select__trigger { height: 28px; font-size: var(--text-xs); }
-    .pc-modal__theme .pc-swatch { width: 14px; height: 14px; }
-
-    .pc-modal__tabs {
-      flex-shrink: 0;
-      padding: var(--space-3) var(--space-5);
-      background: var(--bg-canvas);
-      border-bottom: 1px solid var(--border-subtle);
-    }
-    .pc-modal__tabs .pc-segmented { width: 100%; }
-
-    .pc-modal__body {
-      flex: 1;
-      min-height: 0;
-      overflow-y: auto;
-      display: flex;
-      flex-direction: column;
-      gap: var(--space-4);
-      padding: var(--space-5);
-    }
-
-    .pc-modal__controls { display: flex; align-items: stretch; gap: var(--space-2); }
-    #pc-engine-slot { flex: 1; min-width: 0; }
-    .pc-modal__controls .pc-btn { flex-shrink: 0; }
-
-    /* Callout inner stack — components.css owns the frame itself. */
-    .pc-callout__body {
-      display: flex;
-      flex-direction: column;
-      align-items: flex-start;
-      gap: var(--space-1);
-      min-width: 0;
-    }
-    .pc-callout__text {
-      font-size: var(--text-xs);
-      color: var(--text-secondary);
-      line-height: var(--leading-normal);
-      overflow-wrap: anywhere;
-    }
-
-    /* The output box shows the whole result and runs down the modal; the body
-       scrolls to reach the end of it. It used to stop at a fixed 240px. */
-    .pc-modal__output { flex: 1 1 auto; }
-
-    /* Slots for sheets that are usually closed; as contents they add no gap then. */
-    #pc-save-slot, #pc-library-slot, #pc-secret-slot, #pc-clarify-slot { display: contents; }
-
-    .pc-modal__outbox {
-      flex: 1 0 auto;
-      min-height: 140px;
-      background: var(--bg-sunken);
-      border: 1px solid var(--border-subtle);
-      border-radius: var(--radius-md);
-      padding: var(--space-3);
-    }
-
-    .pc-modal__outtext {
-      font-size: var(--text-sm);
-      line-height: var(--leading-relaxed);
-      color: var(--text-primary);
-      white-space: pre-wrap;
-      word-break: break-word;
-    }
-
-    .pc-modal__footer {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: var(--space-3);
-      flex-shrink: 0;
-      padding: var(--space-3) var(--space-5);
-      border-top: 1px solid var(--border-subtle);
-      background: var(--bg-canvas);
-    }
-
-    .pc-modal__status {
-      display: flex; align-items: center; gap: var(--space-2);
-      font-size: var(--text-xs); color: var(--text-secondary);
-      min-width: 0;
-    }
-
-    .pc-modal__footer-actions { display: flex; align-items: center; gap: var(--space-2); }
-
-    .pc-meter {
-      font-family: var(--font-mono);
-      font-size: var(--text-xs);
-      color: var(--text-tertiary);
-      font-variant-numeric: tabular-nums;
-    }
-
-    @media (prefers-reduced-motion: reduce) {
-      .pc-modal { animation: none; }
-      .pc-star-btn.is-busy svg,
-      .pc-star-btn.is-busy .pc-spinner { animation: none; }
-    }
-  `;
-
   /* ------------------------------------------------------------------ */
   /* Bootstrap                                                           */
   /* ------------------------------------------------------------------ */
@@ -336,11 +78,14 @@
   let currentTargetElement = null;
   let isModalOpen = false;
 
+  const PANEL = name => chrome.runtime.getURL('content/' + name);
+
+  /* The design system's sheets, then the panel's own layout (content/panel.css). */
   async function loadSharedCss() {
-    const names = ['theme.css', 'base.css', 'components.css'];
+    const urls = ['theme.css', 'base.css', 'components.css'].map(SHARED).concat(PANEL('panel.css'));
     const parts = await Promise.all(
-      names.map(n => fetch(SHARED(n)).then(r => {
-        if (!r.ok) throw new Error(`${n}: HTTP ${r.status}`);
+      urls.map(url => fetch(url).then(r => {
+        if (!r.ok) throw new Error(`${url.split('/').pop()}: HTTP ${r.status}`);
         return r.text();
       }))
     );
@@ -348,7 +93,8 @@
   }
 
   async function loadModules() {
-    const [icons, select, themePicker, engines, saveSheet, library, runClient, assist, clarify, targetProfiles, pcoControls] = await Promise.all([
+    const [icons, select, themePicker, engines, saveSheet, library, runClient, assist, clarify, targetProfiles, pcoControls,
+      panelTemplate, editorDom] = await Promise.all([
         import(SHARED('icons.js')),
         import(SHARED('select.js')),
         import(SHARED('theme-picker.js')),
@@ -359,9 +105,12 @@
         import(SHARED('assist.js')),
         import(SHARED('clarify.js')),
         import(SHARED('target-profiles.js')),
-        import(SHARED('pco-controls.js'))
+        import(SHARED('pco-controls.js')),
+        import(PANEL('panel-template.js')),
+        import(PANEL('editor-dom.js'))
     ]);
-    return { icons, select, themePicker, engines, saveSheet, library, runClient, assist, clarify, targetProfiles, pcoControls };
+    return { icons, select, themePicker, engines, saveSheet, library, runClient, assist, clarify, targetProfiles, pcoControls,
+      panelTemplate, editorDom };
   }
 
   init();
@@ -371,18 +120,8 @@
     try {
       css = await loadSharedCss();
     } catch (err) {
-      console.warn('[PromptOptimizer] could not load shared stylesheet:', err);
+      console.warn('[PromptOptimizer] could not load its stylesheets:', err);
     }
-
-    const styleEl = document.createElement('style');
-    styleEl.textContent = css + '\n' + SURFACE_CSS;
-    shadow.appendChild(styleEl);
-
-    const root = document.createElement('div');
-    root.className = 'pc-root';
-    root.setAttribute('data-theme', 'dark');
-    root.innerHTML = TEMPLATE;
-    shadow.appendChild(root);
 
     // The modules ship inside the extension; if they cannot load, the install is
     // broken, so no panel is shown rather than a half-working one.
@@ -393,6 +132,17 @@
       console.error('[PromptOptimizer] could not load its modules; reload the extension:', err);
       return;
     }
+
+    const styleEl = document.createElement('style');
+    styleEl.textContent = css;
+    shadow.appendChild(styleEl);
+
+    const root = document.createElement('div');
+    root.className = 'pc-root';
+    root.setAttribute('data-theme', 'dark');
+    root.innerHTML = ds.panelTemplate.panelTemplate(LOGO_URL);
+    shadow.appendChild(root);
+
     wire({ root, ds });
   }
 
@@ -400,135 +150,6 @@
   function ensureHost() {
     if ((siteAvailable || isModalOpen) && !host.isConnected && document.body) document.body.appendChild(host);
   }
-
-  const TEMPLATE = `
-    <button type="button" class="pc-star-btn" id="pc-star-btn" data-state="idle"
-            aria-label="Enhance this prompt (Alt+click: fix typos only)" title="Enhance this prompt (Alt+click: fix typos only)">
-      <span data-icon="star" data-icon-size="15"></span>
-    </button>
-
-    <div class="pc-backdrop" id="pc-backdrop">
-      <div class="pc-modal" role="dialog" aria-modal="true" aria-labelledby="pc-modal-title">
-        <header class="pc-modal__header">
-          <div class="pc-modal__brand">
-            <img class="pc-modal__logo" src="${LOGO_URL}" alt="">
-            <div>
-              <div class="pc-modal__title-row">
-                <div class="pc-modal__title" id="pc-modal-title">PromptOptimizer</div>
-                <span class="pc-badge pc-badge--accent pc-badge--mono" id="pc-target-badge" hidden></span>
-              </div>
-              <span class="pc-modal__subtitle">yourlegalaid</span>
-            </div>
-          </div>
-          <div class="pc-modal__actions">
-            <button type="button" class="pc-icon-btn" id="pc-library-btn" aria-pressed="false"
-                    title="Saved prompts" aria-label="Saved prompts">
-              <span data-icon="bookmark"></span>
-            </button>
-            <div class="pc-modal__theme" id="pc-theme-slot"></div>
-            <button type="button" class="pc-icon-btn" id="pc-close-btn" aria-label="Close">
-              <span data-icon="close"></span>
-            </button>
-          </div>
-        </header>
-
-        <div class="pc-modal__tabs">
-          <div class="pc-segmented" id="pc-tabs" role="tablist" aria-label="Optimizer framework"></div>
-        </div>
-
-        <div class="pc-modal__body">
-          <div id="pc-library-slot"></div>
-          <div class="pc-field">
-            <div class="pc-field__row">
-              <span class="pc-label">Raw prompt</span>
-              <span class="pc-meter" id="pc-char-count">0</span>
-            </div>
-            <textarea id="pc-raw-input" class="pc-textarea" rows="4"
-              placeholder="Type or paste the prompt you want to elevate…"></textarea>
-          </div>
-
-          <div class="pc-assist-row" id="pc-assist-row">
-            <label class="pc-switch pc-context-toggle" title="Adds this page's title, address and selected text to the request, so the rewrite can be specific to it">
-              <input type="checkbox" id="pc-context-toggle">
-              <span class="pc-switch__track"><span class="pc-switch__thumb"></span></span>
-              <span class="pc-switch__label">Use page context</span>
-            </label>
-            <button type="button" class="pc-btn pc-btn--ghost pc-btn--sm" id="pc-ask-btn"
-                    title="Answer up to three questions before the rewrite">
-              <span data-icon="brain" data-icon-size="13"></span><span>Ask me first</span>
-            </button>
-          </div>
-          <div id="pc-secret-slot"></div>
-          <div id="pc-clarify-slot"></div>
-
-          <div id="pc-advanced-slot"></div>
-          <div class="pc-modal__controls">
-            <div id="pc-engine-slot"></div>
-            <div id="pc-variant-slot"></div>
-            <button type="button" id="pc-optimize-btn" class="pc-btn pc-btn--primary pc-btn--md"
-                    title="Optimize prompt (Ctrl+Enter)">
-              <span data-icon="wand" data-icon-size="14"></span>
-              <span>Optimize</span>
-            </button>
-          </div>
-
-          <div class="pc-field pc-modal__output">
-            <div class="pc-field__row">
-              <span class="pc-label">Optimized prompt</span>
-              <span class="pc-badge pc-badge--accent pc-badge--mono" id="pc-engine-badge" hidden></span>
-            </div>
-            <div class="pc-callout pc-callout--warning" id="pc-degraded" hidden role="status">
-              <span class="pc-callout__icon" data-icon="alert" data-icon-size="15"></span>
-              <div class="pc-callout__body">
-                <span class="pc-callout__title" id="pc-degraded-title">Offline template used</span>
-                <span class="pc-callout__text" id="pc-degraded-reason"></span>
-                <button type="button" class="pc-btn pc-btn--secondary pc-btn--sm" id="pc-degraded-settings-btn">
-                  <span data-icon="settings" data-icon-size="13"></span><span>Open settings</span>
-                </button>
-              </div>
-            </div>
-            <div class="pc-modal__outbox">
-              <div class="pc-empty" id="pc-placeholder">
-                <span class="pc-empty__icon" data-icon="wand" data-icon-size="16"></span>
-                <span class="pc-empty__title">No output yet</span>
-                <span class="pc-empty__desc">Choose a framework, then press Optimize.</span>
-              </div>
-              <div class="pc-loading-state" id="pc-loading-state" hidden role="status" aria-live="polite">
-                <span class="pc-spinner"></span>
-                <span id="pc-loading-label">Preparing optimization…</span>
-              </div>
-              <pre class="pc-modal__outtext" id="pc-result-text" hidden></pre>
-            </div>
-            <div class="pc-variants" id="pc-variant-chips" hidden></div>
-            <div id="pc-actions-slot"></div>
-            <div class="pc-chips" id="pc-tech-chips" hidden></div>
-          </div>
-
-          <div id="pc-save-slot"></div>
-        </div>
-
-        <footer class="pc-modal__footer">
-          <span class="pc-modal__status">
-            <span class="pc-status-dot pc-status-dot--success" id="pc-status-dot"></span>
-            <span id="pc-footer-status">Ready</span>
-          </span>
-          <div class="pc-modal__footer-actions">
-            <button type="button" id="pc-save-btn" class="pc-btn pc-btn--secondary pc-btn--sm">
-              <span data-icon="bookmark" data-icon-size="13"></span><span>Save</span>
-            </button>
-            <button type="button" id="pc-copy-btn" class="pc-btn pc-btn--secondary pc-btn--sm">
-              <span data-icon="copy" data-icon-size="13"></span><span>Copy</span>
-            </button>
-            <button type="button" id="pc-insert-btn" class="pc-btn pc-btn--primary pc-btn--sm">
-              <span data-icon="insert" data-icon-size="13"></span><span>Insert</span>
-            </button>
-          </div>
-        </footer>
-      </div>
-    </div>
-
-    <div class="pc-toast" id="pc-toast" role="status" aria-live="polite"></div>
-  `;
 
   /* ------------------------------------------------------------------ */
   /* Wiring                                                             */
@@ -643,49 +264,12 @@
       return profile;
     }
 
-    /* Fields the floating star button and modal may attach to or read from.
-       Anything that can hold a credential is excluded: the modal copies a
-       field's value into a box that can be sent to a cloud engine. */
-    const SENSITIVE_HINT = /(^|[^a-z])(pass(word|wd)?|otp|cvv|cvc|ccnum|ssn)([^a-z]|$)/i;
-    const SENSITIVE_AUTOCOMPLETE = /(^|\s)(cc-[a-z-]+|current-password|new-password|one-time-code)(\s|$)/i;
-    const FIELD_SELECTOR = 'textarea, input, [contenteditable]:not([contenteditable="false"])';
-
-    function getDeepActiveElement() {
-      let active = document.activeElement;
-      while (active && active !== host && active.shadowRoot && active.shadowRoot.activeElement) {
-        active = active.shadowRoot.activeElement;
-      }
-      return active;
-    }
-
-    function getDeepEventTarget(e) {
-      const path = typeof e?.composedPath === 'function' ? e.composedPath() : null;
-      return (path && path.length > 0 ? path[0] : null) || e?.target || null;
-    }
-
-    function isEligibleField(el) {
-      if (!el || el.nodeType !== 1 || el === host || host.contains(el) || el.getRootNode?.() === shadow) return false;
-      if (el.disabled || el.readOnly) return false;
-
-      const auto = el.getAttribute('autocomplete') || '';
-      if (SENSITIVE_AUTOCOMPLETE.test(auto)) return false;
-      if (SENSITIVE_HINT.test(`${el.name || ''} ${el.id || ''}`)) return false;
-
-      if (el.tagName === 'TEXTAREA') return true;
-      if (el.tagName === 'INPUT') return (el.getAttribute('type') || 'text').toLowerCase() === 'text';
-      return el.isContentEditable === true;
-    }
-
-    /** The eligible field a node belongs to, or null. */
-    function fieldFrom(node) {
-      const el = node instanceof Element ? node.closest(FIELD_SELECTOR) : null;
-      return isEligibleField(el) ? el : null;
-    }
-
-    /** A field of any kind, eligible or not — used to avoid guessing past a sensitive one. */
-    function isFieldLike(el) {
-      return el instanceof Element && el.matches(FIELD_SELECTOR);
-    }
+    /* Reading, writing and finding fields on the host page live in content/editor-dom.js. */
+    const {
+      getDeepActiveElement, getDeepEventTarget, isEligibleField, fieldFrom, isFieldLike,
+      getElementValue, normalizeInsertedText, textsMatchSemantically, insertTextIntoElement,
+      isVisibleElement, getParentAcrossShadow, closestAcrossShadow, findChatInput
+    } = ds.editorDom.createEditorDom({ host, shadow, targetProfiles: ds.targetProfiles });
 
     /* Icons ------------------------------------------------------------ */
     ds.icons.hydrateIcons(root);
@@ -2046,240 +1630,7 @@
       }
     });
 
-    /* Element helpers -------------------------------------------------- */
-    const BLOCK_TAGS = new Set([
-      'ADDRESS', 'ARTICLE', 'ASIDE', 'BLOCKQUOTE', 'DD', 'DETAILS', 'DIALOG',
-      'DIV', 'DL', 'DT', 'FIELDSET', 'FIGCAPTION', 'FIGURE', 'FOOTER', 'FORM',
-      'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'HEADER', 'HGROUP', 'HR', 'LI',
-      'MAIN', 'NAV', 'OL', 'P', 'PRE', 'SECTION', 'TABLE', 'TR', 'UL'
-    ]);
-    const IGNORED_CONTENT_TAGS = new Set(['STYLE', 'SCRIPT', 'NOSCRIPT', 'TEMPLATE']);
-
-    /* Reads rich contenteditable elements (Quill, ProseMirror, Lexical, plain
-       div lines) without Chromium's innerText <p>-margin newline inflation. */
-    function readBlockLines(container) {
-      const childNodes = Array.from(container.childNodes);
-      const hasBlockChildren = childNodes.some(n => n.nodeType === 1 && BLOCK_TAGS.has(n.tagName));
-      const lines = [];
-      let inlineBuf = '';
-      let hasInline = false;
-      let endedWithBr = false;
-
-      const flushInline = () => {
-        if (!hasInline) return;
-        let line = inlineBuf;
-        if (endedWithBr && line.endsWith('\n')) {
-          line = line.slice(0, -1);
-        }
-        lines.push(line);
-        inlineBuf = '';
-        hasInline = false;
-        endedWithBr = false;
-      };
-
-      const walkInline = node => {
-        for (const child of node.childNodes) {
-          if (child.nodeType === 3) {
-            const val = child.nodeValue || '';
-            if (hasBlockChildren && !hasInline && /^[ \t]*[\r\n]+[ \t\r\n]*$/.test(val)) {
-              continue;
-            }
-            inlineBuf += val;
-            hasInline = true;
-            endedWithBr = false;
-          } else if (child.nodeType === 1) {
-            if (IGNORED_CONTENT_TAGS.has(child.tagName) || child.hasAttribute('hidden')) continue;
-            if (child.tagName === 'BR') {
-              inlineBuf += '\n';
-              hasInline = true;
-              endedWithBr = true;
-            } else if (BLOCK_TAGS.has(child.tagName)) {
-              flushInline();
-              if (child.tagName === 'HR') {
-                lines.push('');
-              } else {
-                const sub = readBlockLines(child);
-                if (sub.length) {
-                  lines.push(...sub);
-                } else {
-                  lines.push('');
-                }
-              }
-            } else {
-              walkInline(child);
-            }
-          }
-        }
-      };
-
-      walkInline(container);
-      flushInline();
-      return lines;
-    }
-
-    function readContentEditableText(el) {
-      if (!el) return '';
-      const raw = readBlockLines(el).join('\n');
-      return raw.replace(/\r\n?/g, '\n').replace(/\u00a0/g, ' ');
-    }
-
-    function getElementValue(el) {
-      if (!isEligibleField(el)) return '';
-      if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') return el.value;
-      if (el.isContentEditable) return readContentEditableText(el);
-      return '';
-    }
-
-    const normalizeInsertedText = ds.targetProfiles.normalizeEditableText;
-    const textsMatchSemantically = ds.targetProfiles.editableTextsMatch;
-
-    function syncQuillState(el, text) {
-      if (!el?.classList?.contains('ql-editor')) return;
-      const isBlank = !normalizeInsertedText(text);
-      if (isBlank && el.children.length === 1 && el.firstElementChild?.tagName === 'P' &&
-          !el.firstElementChild.textContent && !el.firstElementChild.querySelector('br')) {
-        el.firstElementChild.appendChild(document.createElement('br'));
-      }
-      el.classList.toggle('ql-blank', isBlank);
-    }
-
-    function collapseSelectionToEnd(el, selection) {
-      try {
-        const endRange = document.createRange();
-        const targetNode = el.lastElementChild?.tagName === 'P' ? el.lastElementChild : el;
-        endRange.selectNodeContents(targetNode);
-        endRange.collapse(false);
-        selection.removeAllRanges();
-        selection.addRange(endRange);
-      } catch {}
-    }
-
-    function insertTextIntoElement(el, text) {
-      if (!isEligibleField(el)) el = findChatInput();
-      if (!el) return false;
-
-      try {
-        el.focus({ preventScroll: true });
-      } catch {
-        el.focus();
-      }
-
-      if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
-        try {
-          const proto = el.tagName === 'TEXTAREA'
-            ? window.HTMLTextAreaElement.prototype
-            : window.HTMLInputElement.prototype;
-          Object.getOwnPropertyDescriptor(proto, 'value')?.set?.call(el, text);
-        } catch {}
-        if (el.value !== text) el.value = text;
-        el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
-        el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
-        return true;
-      }
-
-      if (el.isContentEditable) {
-        const selection = window.getSelection();
-        const range = document.createRange();
-        range.selectNodeContents(el);
-        selection.removeAllRanges();
-        selection.addRange(range);
-
-        // 1. execCommand preserves ProseMirror / Lexical / Quill undo stacks when accepted cleanly.
-        let ok = false;
-        try { ok = document.execCommand('insertText', false, text); } catch { ok = false; }
-        if (ok && textsMatchSemantically(getElementValue(el), text)) {
-          syncQuillState(el, text);
-          return true;
-        }
-
-        // 2. Synthetic plain-text paste handles rich editors that ignore execCommand.
-        try {
-          const dt = new DataTransfer();
-          dt.setData('text/plain', text);
-          const pasteEvt = new ClipboardEvent('paste', {
-            bubbles: true,
-            cancelable: true,
-            clipboardData: dt
-          });
-          const pasteRange = document.createRange();
-          pasteRange.selectNodeContents(el);
-          selection.removeAllRanges();
-          selection.addRange(pasteRange);
-          el.dispatchEvent(pasteEvt);
-          if (textsMatchSemantically(getElementValue(el), text)) {
-            syncQuillState(el, text);
-            return true;
-          }
-        } catch {}
-
-        // 3. Direct DOM fallback (Trusted Types safe: builds <p> blots without innerHTML).
-        try {
-          el.dispatchEvent(new InputEvent('beforeinput', {
-            bubbles: true,
-            cancelable: true,
-            inputType: 'insertReplacementText',
-            data: text
-          }));
-        } catch {}
-        if (el.classList.contains('ql-editor') || el.classList.contains('ProseMirror')) {
-          const lines = String(text ?? '').replace(/\r\n?/g, '\n').split('\n');
-          const frag = document.createDocumentFragment();
-          for (const line of lines) {
-            const p = document.createElement('p');
-            if (line.length > 0) p.textContent = line;
-            else p.appendChild(document.createElement('br'));
-            frag.appendChild(p);
-          }
-          el.replaceChildren(frag);
-          syncQuillState(el, text);
-        } else {
-          el.innerText = text;
-        }
-        el.dispatchEvent(new InputEvent('input', {
-          bubbles: true,
-          composed: true,
-          inputType: 'insertReplacementText',
-          data: text
-        }));
-        el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
-        collapseSelectionToEnd(el, selection);
-        return true;
-      }
-
-      return false;
-    }
-
     /* Star button positioning ------------------------------------------ */
-    function isVisibleElement(el) {
-      if (!el || !el.isConnected) return false;
-      const cs = getComputedStyle(el);
-      if (cs.display === 'none' || cs.visibility === 'hidden' || parseFloat(cs.opacity) === 0) {
-        return false;
-      }
-      const r = el.getBoundingClientRect();
-      return r.width > 0 && r.height > 0;
-    }
-
-    function getParentAcrossShadow(node) {
-      if (!node) return null;
-      if (node.parentElement) return node.parentElement;
-      const rootNode = node.getRootNode?.();
-      return typeof ShadowRoot === 'function' && rootNode instanceof ShadowRoot ? rootNode.host : null;
-    }
-
-    function closestAcrossShadow(startEl, selector) {
-      let cur = startEl;
-      while (cur) {
-        try {
-          const hit = cur.closest(selector);
-          if (hit) return hit;
-        } catch {}
-        const rootNode = cur.getRootNode?.();
-        cur = typeof ShadowRoot === 'function' && rootNode instanceof ShadowRoot ? rootNode.host : null;
-      }
-      return null;
-    }
-
     function findComposerAnchor(targetEl) {
       if (!targetEl || !targetEl.isConnected) return targetEl;
       const tRect = targetEl.getBoundingClientRect();
@@ -2507,48 +1858,6 @@
         starBtn.style.display = 'flex';
         lastStarRender = { target: targetEl, top: chosen.top, left: chosen.left, display: 'flex' };
       });
-    }
-
-    function getOpenShadowRoots() {
-      const roots = [];
-      try {
-        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
-        let node;
-        while ((node = walker.nextNode())) {
-          if (node !== host && node.shadowRoot) roots.push(node.shadowRoot);
-        }
-      } catch {}
-      return roots;
-    }
-
-    function findMatchingInputInRoot(rootNode, selectors) {
-      for (const selector of selectors) {
-        let matches = [];
-        try {
-          matches = rootNode.querySelectorAll(selector);
-        } catch {
-          continue;
-        }
-        for (const el of matches) {
-          if (isEligibleField(el) && isVisibleElement(el)) return el;
-        }
-      }
-      return null;
-    }
-
-    /** The field the user most plausibly means: the focused one, else the first visible chat-like box. */
-    function findChatInput() {
-      const focused = fieldFrom(getDeepActiveElement());
-      if (focused) return focused;
-      const profile = resolveSiteProfile();
-      const selectors = ds.targetProfiles.getChatInputSelectors(profile);
-      const lightMatch = findMatchingInputInRoot(document, selectors);
-      if (lightMatch) return lightMatch;
-      for (const sr of getOpenShadowRoots()) {
-        const shadowMatch = findMatchingInputInRoot(sr, selectors);
-        if (shadowMatch) return shadowMatch;
-      }
-      return null;
     }
 
     function autoDetectAndPosition() {

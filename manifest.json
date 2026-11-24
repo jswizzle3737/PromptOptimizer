@@ -80,6 +80,9 @@
         "shared/modes.js",
         "shared/intensity.js",
         "shared/email-draft.js",
+        "content/panel.css",
+        "content/panel-template.js",
+        "content/editor-dom.js",
         "assets/logo.png"
       ],
       "matches": [

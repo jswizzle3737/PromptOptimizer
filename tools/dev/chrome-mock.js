@@ -64,7 +64,8 @@
           if (message.type === 'READ_STATE') {
             const storage = await import('/shared/storage.js');
             const settings = await storage.getSettings();
-            return { success: true, state: { settings, frameworks: data.promptcraft_frameworks, sites: [location.origin], library: [] } };
+            const library = await (await import('/shared/library.js')).getLibrary();
+            return { success: true, state: { settings, frameworks: data.promptcraft_frameworks, sites: [location.origin], library } };
           }
           return { success: true };
         } catch (error) { return { success: false, error: error.message }; }
