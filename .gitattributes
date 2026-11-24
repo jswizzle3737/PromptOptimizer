@@ -1,0 +1,5 @@
+# Keep the LF line endings the sources are written with, on every OS.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.ico binary

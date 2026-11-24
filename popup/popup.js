@@ -1,0 +1,1411 @@
+import {
+  getSettings, getHistory, getSites, takePendingPrompt, PROVIDER_DEFAULTS
+} from '../shared/storage.js';
+import { getFrameworks } from '../shared/frameworks.js';
+import { createSelect, escapeHtml } from '../shared/select.js';
+import { createThemeMenu, applyTheme, watchTheme, getTheme } from '../shared/theme-picker.js';
+import { icon, hydrateIcons } from '../shared/icons.js';
+import { engineOptions, ENGINE_LABELS, DEFAULT_ENGINE } from '../shared/engines.js';
+import { getLibrary, collectLabels, deriveTitle } from '../shared/library.js';
+import { createSaveSheet } from '../shared/save-sheet.js';
+import { startRun, writeUserData } from '../shared/run-client.js';
+import { withAnswers } from '../shared/clarify.js';
+import {
+  createResultActions, createClarifySheet, createSendNotice, createLibraryPicker,
+  createUndoStack, bindEditableResult
+} from '../shared/assist.js';
+import { checkBuiltInPromptApiStatus, verifyProvider } from '../shared/optimizer-engine.js';
+import { NANO_SESSION_OPTIONS } from '../shared/nano.js';
+import { getTargetProfile } from '../shared/target-profiles.js';
+import { createAdvancedControls, createResultTabs } from '../shared/pco-controls.js';
+import { GMAIL_ORIGIN } from '../shared/email-draft.js';
+
+document.addEventListener('DOMContentLoaded', async () => {
+  hydrateIcons(document);
+
+  const el = {
+    onboardingView: document.getElementById('onboarding-view'),
+    onboardingStart: document.getElementById('onboarding-start'),
+    frameworkBar: document.getElementById('framework-bar'),
+    frameworkTabs: document.getElementById('framework-tabs'),
+    themeSlot: document.getElementById('theme-toggle-slot'),
+    engineSlot: document.getElementById('engine-slot'),
+    rawPrompt: document.getElementById('raw-prompt'),
+    targetBadge: document.getElementById('target-badge'),
+    clearDraftBtn: document.getElementById('clear-draft-btn'),
+    charCounter: document.getElementById('char-counter'),
+    optimizeBtn: document.getElementById('optimize-btn'),
+    loadingState: document.getElementById('loading-state'),
+    loadingLabel: document.getElementById('loading-label'),
+    resultText: document.getElementById('result-text'),
+    resultPlaceholder: document.getElementById('result-placeholder'),
+    techChips: document.getElementById('tech-chips'),
+    variantChips: document.getElementById('variant-chips'),
+    variantSlot: document.getElementById('variant-slot'),
+    statusMessage: document.getElementById('status-message'),
+    statusDot: document.getElementById('status-dot'),
+    engineBadge: document.getElementById('engine-status-badge'),
+    degradedNotice: document.getElementById('degraded-notice'),
+    degradedTitle: document.getElementById('degraded-title'),
+    degradedReason: document.getElementById('degraded-reason'),
+    degradedSettingsBtn: document.getElementById('degraded-settings-btn'),
+    copyBtn: document.getElementById('copy-btn'),
+    saveBtn: document.getElementById('save-btn'),
+    saveSlot: document.getElementById('save-slot'),
+    optionsBtn: document.getElementById('options-btn'),
+    historyToggle: document.getElementById('history-toggle-btn'),
+    historyView: document.getElementById('history-view'),
+    mainView: document.getElementById('main-view'),
+    historyList: document.getElementById('history-list'),
+    clearHistoryBtn: document.getElementById('clear-history-btn'),
+    siteRow: document.getElementById('site-row'),
+    siteText: document.getElementById('site-text'),
+    siteToggle: document.getElementById('site-toggle-btn'),
+    toast: document.getElementById('toast'),
+    libraryToggle: document.getElementById('library-toggle-btn'),
+    librarySlot: document.getElementById('library-slot'),
+    contextToggle: document.getElementById('context-toggle'),
+    askFirstBtn: document.getElementById('ask-first-btn'),
+    secretSlot: document.getElementById('secret-slot'),
+    clarifySlot: document.getElementById('clarify-slot'),
+    advancedSlot: document.getElementById('advanced-slot'),
+    resultActionsSlot: document.getElementById('result-actions-slot'),
+    resultTabsSlot: document.getElementById('result-tabs-slot'),
+    resultTabsInstance: null,
+    setupCard: document.getElementById('setup-card'),
+    setupText: document.getElementById('setup-text'),
+    setupCheckBtn: document.getElementById('setup-check-btn'),
+    setupDownloadBtn: document.getElementById('setup-download-btn'),
+    setupProviderSlot: document.getElementById('setup-provider-slot'),
+    setupKey: document.getElementById('setup-key'),
+    setupKeyLink: document.getElementById('setup-key-link'),
+    setupDismissBtn: document.getElementById('setup-dismiss-btn'),
+    setupSaveBtn: document.getElementById('setup-save-btn')
+  };
+
+  const state = {
+    framework: 'smart-expand',
+    engine: DEFAULT_ENGINE,
+    modeId: 'general',
+    targetId: '',
+    intensity: 'balanced',
+    theme: 'dark',
+    host: null,
+    latest: '',
+    /* What the result on screen came from, so a saved prompt records it. */
+    original: '',
+    resultEngine: '',
+    resultFramework: '',
+    busy: false,
+    historyOpen: false,
+    variantCount: 1,
+    variants: [],
+    /* The full result on screen (null for a library prompt or history). */
+    lastData: null
+  };
+
+  const SESSION_KEY = 'promptcraft_popup_session';
+  const undoStack = createUndoStack(25);
+
+  /* ---------------------------------------------------------------- Toast */
+  let toastTimer;
+  function toast(msg, tone = 'neutral') {
+    const toneIcon = { success: 'check', danger: 'alert', neutral: 'info' }[tone] || 'info';
+    el.toast.innerHTML = `${icon(toneIcon, { size: 13 })}<span>${escapeHtml(msg)}</span>`;
+    el.toast.classList.add('is-visible');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => el.toast.classList.remove('is-visible'), 2600);
+  }
+
+  /**
+   * The status dot only carries meaning when it has a tone. "Ready" is neutral:
+   * a green dot before anything has happened claims a success that never occurred.
+   */
+  function setStatus(text, tone = 'neutral') {
+    el.statusMessage.textContent = text;
+    el.statusDot.className = 'pc-status-dot' +
+      (tone === 'success' ? ' pc-status-dot--success'
+        : tone === 'warning' ? ' pc-status-dot--warning'
+          : tone === 'danger' ? ' pc-status-dot--danger' : '');
+  }
+
+  function updateClearDraftVisibility() {
+    el.clearDraftBtn.hidden = !(el.rawPrompt.value || state.latest || undoStack.canUndo());
+  }
+
+  let sessionSaveTimer = null;
+  async function saveSession() {
+    clearTimeout(sessionSaveTimer);
+    sessionSaveTimer = null;
+    if (!chrome.storage?.session) return;
+    try {
+      if (!el.rawPrompt.value && !state.latest && !undoStack.canUndo()) {
+        await chrome.storage.session.remove(SESSION_KEY);
+        return;
+      }
+      await chrome.storage.session.set({
+        [SESSION_KEY]: {
+          rawPrompt: el.rawPrompt.value,
+          framework: state.framework,
+          latest: state.latest,
+          original: state.original,
+          resultEngine: state.resultEngine,
+          resultFramework: state.resultFramework,
+          lastData: state.lastData,
+          variants: state.variants,
+          undoStack: undoStack.toJSON()
+        }
+      });
+    } catch {}
+  }
+
+  function scheduleSessionSave() {
+    updateClearDraftVisibility();
+    clearTimeout(sessionSaveTimer);
+    sessionSaveTimer = setTimeout(() => { saveSession(); }, 180);
+  }
+
+  /* -------------------------------------------------------------- Theming */
+  const settings = await getSettings();
+  state.modeId = settings.modeId || 'general';
+  state.targetId = settings.preferredTarget || '';
+  state.intensity = settings.optimizationIntensity || 'balanced';
+  state.theme = settings.theme || 'dark';
+  applyTheme(document.documentElement, state.theme);
+
+  const themeMenu = createThemeMenu({
+    value: state.theme,
+    onChange: async id => {
+      state.theme = id;
+      applyTheme(document.documentElement, id);
+      await writeUserData('saveSettings', { theme: id });
+      toast(`${getTheme(id).name} design`, 'success');
+    }
+  });
+  el.themeSlot.appendChild(themeMenu.element);
+
+  watchTheme(id => {
+    if (id !== state.theme) {
+      state.theme = id;
+      applyTheme(document.documentElement, id);
+      themeMenu.setValue(id, { silent: true });
+    }
+  });
+
+  /* ------------------------------------------------------------- Controls */
+  const engineSelect = createSelect({
+    options: engineOptions(),
+    value: settings.preferredEngine || DEFAULT_ENGINE,
+    placement: 'up',
+    label: 'Optimization engine',
+    /* Persisted: the engine picked here is the one the in-page panel uses on
+       every other site — a per-run choice silently reverted to Nano there. */
+    onChange: async v => {
+      state.engine = v;
+      await writeUserData('saveSettings', { preferredEngine: v });
+    }
+  });
+  state.engine = engineSelect.getValue();
+  el.engineSlot.appendChild(engineSelect.element);
+
+  /* Variant count: how many alternative rewrites each optimization produces.
+     Persisted so the in-page panel picks the same number up. */
+  state.variantCount = Math.max(1, Math.min(3, parseInt(settings.variantCount, 10) || 1));
+  const variantSelect = createSelect({
+    options: [
+      { value: '1', label: 'Single' },
+      { value: '2', label: 'Two' },
+      { value: '3', label: 'Three' }
+    ],
+    value: String(state.variantCount),
+    placement: 'up',
+    label: 'Rewrite variants',
+    onChange: async v => {
+      state.variantCount = parseInt(v, 10) || 1;
+      await writeUserData('saveSettings', { variantCount: state.variantCount });
+    }
+  });
+  el.variantSlot.appendChild(variantSelect.element);
+
+  createAdvancedControls({
+    container: el.advancedSlot,
+    value: { modeId: state.modeId, targetId: state.targetId, intensity: state.intensity },
+    onChange: async ({ modeId, targetId, intensity }) => {
+      state.modeId = modeId;
+      state.targetId = targetId;
+      state.intensity = intensity;
+      await writeUserData('saveSettings', { modeId, preferredTarget: targetId, optimizationIntensity: intensity });
+    }
+  });
+
+  /* ----------------------------------------------------------- Frameworks */
+  const frameworks = await getFrameworks();
+  const valid = id => frameworks.some(f => f.id === id);
+  state.framework = valid(settings.preferredFramework)
+    ? settings.preferredFramework
+    : (frameworks[0]?.id || 'smart-expand');
+
+  function renderFrameworkTabs() {
+    el.frameworkTabs.innerHTML = '';
+    frameworks.forEach(fw => {
+      const selected = fw.id === state.framework;
+      const tab = document.createElement('button');
+      tab.type = 'button';
+      tab.className = 'pc-segmented__item';
+      tab.setAttribute('role', 'tab');
+      tab.dataset.framework = fw.id;
+      tab.setAttribute('aria-selected', String(selected));
+      tab.setAttribute('tabindex', selected ? '0' : '-1');
+      tab.title = fw.tagline || fw.name;
+      tab.innerHTML =
+        `<span class="pc-segmented__icon">${icon(fw.icon, { size: 13 })}</span>` +
+        `<span>${escapeHtml(fw.name)}</span>`;
+      el.frameworkTabs.appendChild(tab);
+    });
+  }
+  renderFrameworkTabs();
+
+  function selectFrameworkTab(id, { focus = false } = {}) {
+    const tabs = [...el.frameworkTabs.querySelectorAll('.pc-segmented__item')];
+    const target = tabs.find(t => t.dataset.framework === id);
+    if (!target) return;
+    tabs.forEach(t => {
+      const selected = t === target;
+      t.setAttribute('aria-selected', String(selected));
+      t.setAttribute('tabindex', selected ? '0' : '-1');
+    });
+    state.framework = id;
+    if (focus) target.focus();
+    scheduleSessionSave();
+    if (!state.busy && state.latest && state.resultFramework && state.framework !== state.resultFramework) {
+      setStatus(`Switched to ${target.textContent.trim()} — click Optimize to rewrite`, 'neutral');
+    }
+  }
+
+  el.frameworkTabs.addEventListener('click', e => {
+    const tab = e.target.closest('.pc-segmented__item');
+    if (tab) selectFrameworkTab(tab.dataset.framework);
+  });
+
+  el.frameworkTabs.addEventListener('keydown', e => {
+    const tabs = [...el.frameworkTabs.querySelectorAll('.pc-segmented__item')];
+    if (!tabs.length) return;
+    const idx = tabs.indexOf(document.activeElement);
+    if (idx === -1) return;
+    let nextIdx = -1;
+    if (e.key === 'ArrowRight') nextIdx = (idx + 1) % tabs.length;
+    else if (e.key === 'ArrowLeft') nextIdx = (idx - 1 + tabs.length) % tabs.length;
+    else if (e.key === 'Home') nextIdx = 0;
+    else if (e.key === 'End') nextIdx = tabs.length - 1;
+    if (nextIdx === -1) return;
+    e.preventDefault();
+    selectFrameworkTab(tabs[nextIdx].dataset.framework, { focus: true });
+  });
+
+  /* ------------------------------------------------------- Input feedback */
+  el.rawPrompt.addEventListener('input', () => {
+    el.charCounter.textContent = String(el.rawPrompt.value.length);
+    scheduleSessionSave();
+  });
+
+  async function clearWorkspace() {
+    if (state.busy) return;
+    el.rawPrompt.value = '';
+    el.charCounter.textContent = '0';
+    state.latest = '';
+    state.original = '';
+    state.resultEngine = '';
+    state.resultFramework = '';
+    state.lastData = null;
+    state.variants = [];
+    undoStack.clear();
+    editableCtrl.setEditable(false);
+    el.resultText.textContent = '';
+    el.resultText.hidden = true;
+    el.resultPlaceholder.hidden = false;
+    updateResultTabs(null, '');
+    el.loadingState.hidden = true;
+    el.degradedNotice.hidden = true;
+    el.engineBadge.hidden = true;
+    el.engineBadge.title = '';
+    el.variantChips.hidden = true;
+    el.techChips.hidden = true;
+    resultActions.clearCustomInput();
+    resultActions.update(actionState());
+    secretNotice.hide();
+    saveSheet.close();
+    clarifySheet.close();
+    updateClearDraftVisibility();
+    setStatus('Ready', 'neutral');
+    try { await chrome.storage.session?.remove?.(SESSION_KEY); } catch {}
+    el.rawPrompt.focus();
+  }
+  el.clearDraftBtn.addEventListener('click', clearWorkspace);
+
+  /* --------------------------------------------------------------- Shell */
+  el.optionsBtn.addEventListener('click', async () => {
+    await saveSession();
+    chrome.runtime.openOptionsPage();
+  });
+  el.degradedSettingsBtn.addEventListener('click', async () => {
+    await saveSession();
+    chrome.runtime.openOptionsPage();
+  });
+
+  /* ------------------------------------------------------------- History */
+  async function renderHistory() {
+    const items = await getHistory();
+    el.historyList.innerHTML = '';
+
+    if (items.length === 0) {
+      el.historyList.innerHTML = `
+        <div class="pc-empty">
+          <span class="pc-empty__icon">${icon('clock', { size: 16 })}</span>
+          <span class="pc-empty__title">Nothing yet</span>
+          <span class="pc-empty__desc">Optimized prompts will be listed here.</span>
+        </div>`;
+      return;
+    }
+
+    items.forEach(item => {
+      const row = document.createElement('div');
+      row.className = 'pc-history__item';
+      row.tabIndex = 0;
+      row.setAttribute('role', 'button');
+      const time = new Date(item.timestamp).toLocaleString([], {
+        month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
+      });
+      // Same wording as the Options history: names, not ids, and a Fallback badge.
+      const frameworkLabel = frameworks.find(f => f.id === item.framework)?.name || item.framework || '';
+      const engineLabel = ENGINE_LABELS[item.engine] || item.engine || '';
+      const meta = [time, frameworkLabel, engineLabel].filter(Boolean).join(' · ');
+      row.innerHTML = `
+        <div class="pc-history__preview">${escapeHtml(item.original || '')}</div>
+        <div class="pc-history__meta">
+          <span>${escapeHtml(meta)}</span>
+          ${item.degraded ? '<span class="pc-badge pc-badge--warning">Fallback</span>' : ''}
+        </div>
+      `;
+      const restore = () => {
+        pushUndoSnapshot();
+        stopWaitTimer();
+        el.rawPrompt.value = item.original || '';
+        el.charCounter.textContent = String(el.rawPrompt.value.length);
+        state.latest = item.optimized || '';
+        state.original = item.original || '';
+        state.resultEngine = item.engine || '';
+        state.resultFramework = item.framework || '';
+        state.lastData = null;
+        state.variants = [];
+        el.degradedNotice.hidden = true;
+        el.engineBadge.hidden = !state.resultEngine;
+        if (state.resultEngine) {
+          el.engineBadge.textContent = ENGINE_LABELS[state.resultEngine] || state.resultEngine;
+          el.engineBadge.className = 'pc-badge pc-badge--mono ' + (item.degraded ? 'pc-badge--warning' : 'pc-badge--accent');
+          el.engineBadge.title = '';
+        } else {
+          el.engineBadge.title = '';
+        }
+        el.variantChips.hidden = true;
+        el.techChips.hidden = true;
+        showResult(state.latest);
+        editableCtrl.setEditable(Boolean(state.latest && !state.busy));
+        resultActions.update(actionState());
+        /* The engine picker is left alone: restoring a result must not quietly
+           point the next Optimize at the provider (possibly a cloud fallback)
+           that happened to produce it. */
+        updateClearDraftVisibility();
+        scheduleSessionSave();
+        setHistoryOpen(false);
+        el.rawPrompt.focus();
+      };
+      row.addEventListener('click', restore);
+      row.addEventListener('keydown', e => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); restore(); }
+      });
+      el.historyList.appendChild(row);
+    });
+  }
+
+  function showResult(text) {
+    if (!text) return;
+    stopWaitTimer();
+    el.resultPlaceholder.hidden = true;
+    el.resultText.hidden = false;
+    el.resultText.textContent = text;
+    updateResultTabs(state.lastData, state.original);
+  }
+
+  function setHistoryOpen(open) {
+    // History or Library from the header during first run: leave the welcome
+    // screen rather than stacking the view under it.
+    if (!el.onboardingView.hidden) finishOnboarding();
+    state.historyOpen = open;
+    el.historyView.hidden = !open;
+    el.mainView.hidden = open;
+    document.getElementById('framework-bar').hidden = open; // frameworks do nothing in history
+    el.historyToggle.setAttribute('aria-pressed', String(open));
+    el.historyToggle.classList.toggle('is-active', open);
+    if (open) {
+      renderHistory();
+      if (libraryPicker.isOpen()) setLibraryOpen(false);
+    }
+  }
+
+  el.historyToggle.addEventListener('click', () => setHistoryOpen(!state.historyOpen));
+
+  /* Clear-all is destructive and irreversible, so it asks once. */
+  let clearArmed = false;
+  let clearTimer;
+  el.clearHistoryBtn.addEventListener('click', async () => {
+    if (!clearArmed) {
+      clearArmed = true;
+      el.clearHistoryBtn.textContent = 'Confirm?';
+      clearTimer = setTimeout(() => {
+        clearArmed = false;
+        el.clearHistoryBtn.textContent = 'Clear all';
+      }, 3000);
+      return;
+    }
+    clearTimeout(clearTimer);
+    clearArmed = false;
+    el.clearHistoryBtn.textContent = 'Clear all';
+    await writeUserData('clearHistory');
+    await renderHistory();
+    toast('History cleared', 'success');
+  });
+
+  /* ------------------------------------------------------------ Optimize */
+  /* While a request runs, the Optimize button becomes Cancel. */
+  let currentRun = null;
+  let waitTimer = null;
+
+  function stopWaitTimer() {
+    clearInterval(waitTimer);
+    waitTimer = null;
+    el.loadingState.hidden = true;
+  }
+
+  function startWaitTimer(label, tone = 'neutral') {
+    stopWaitTimer();
+    let sec = 0;
+    el.loadingLabel.textContent = label;
+    el.loadingState.hidden = false;
+    waitTimer = setInterval(() => {
+      sec += 1;
+      const text = `${label} (${sec}s)`;
+      el.loadingLabel.textContent = text;
+      if (state.busy) setStatus(text, tone);
+    }, 1000);
+  }
+
+  function setBusy(busy) {
+    state.busy = busy;
+    el.optimizeBtn.innerHTML = busy
+      ? `${icon('close', { size: 14 })}<span>Cancel</span>`
+      : `${icon('wand', { size: 14 })}<span>Optimize</span>`;
+    el.optimizeBtn.title = busy ? 'Stop this request' : 'Optimize prompt (Ctrl+Enter)';
+    el.askFirstBtn.disabled = busy;
+    editableCtrl.setEditable(Boolean(state.latest && !busy));
+    resultActions.update({ ...actionState(), busy });
+  }
+
+  /** Tell the truth about a degraded result rather than painting it as success. */
+  function showDegraded(data) {
+    const requested = ENGINE_LABELS[data.requestedEngine] || data.requestedEngine || 'That engine';
+    el.degradedTitle.textContent = `${requested} unavailable — offline template used`;
+    el.degradedReason.textContent = data.degradedReason
+      ? `${data.degradedReason} The output below is a local template, not a model response.`
+      : 'The output below is a local template, not a model response.';
+    el.degradedNotice.hidden = false;
+  }
+
+  /* Technique chips: what the optimizer added and why, shown under the result.
+     textContent, not innerHTML — chip labels arrive over messaging. */
+  function renderTechChips(chips) {
+    el.techChips.innerHTML = '';
+    if (!Array.isArray(chips) || chips.length === 0) {
+      el.techChips.hidden = true;
+      return;
+    }
+    for (const chip of chips) {
+      const span = document.createElement('span');
+      span.className = 'pc-badge pc-badge--mono';
+      span.textContent = String(chip?.label ?? '');
+      if (chip?.detail) span.title = String(chip.detail);
+      el.techChips.appendChild(span);
+    }
+    el.techChips.hidden = false;
+  }
+
+  function currentSnapshot() {
+    if (!state.latest) return null;
+    return {
+      text: state.latest,
+      original: state.original,
+      engine: state.resultEngine,
+      framework: state.resultFramework,
+      data: state.lastData,
+      variants: state.variants.slice()
+    };
+  }
+
+  function pushUndoSnapshot(snap = currentSnapshot()) {
+    if (snap && undoStack.push(snap)) {
+      updateClearDraftVisibility();
+      resultActions.update({ ...actionState(), busy: state.busy });
+    }
+  }
+
+  function restoreSnapshot(snap, { statusText = 'Reverted change' } = {}) {
+    if (!snap) return;
+    stopWaitTimer();
+    state.lastData = snap.data || null;
+    state.latest = snap.text || '';
+    state.original = snap.original || '';
+    state.resultEngine = snap.engine || '';
+    state.resultFramework = snap.framework || state.framework;
+    state.variants = Array.isArray(snap.variants) ? snap.variants.slice() : [];
+    el.resultText.textContent = state.latest;
+    el.resultText.hidden = !state.latest;
+    el.resultPlaceholder.hidden = Boolean(state.latest);
+    el.degradedNotice.hidden = !(state.lastData?.degraded);
+    if (state.resultEngine && state.lastData) {
+      el.engineBadge.textContent = ENGINE_LABELS[state.resultEngine] || state.resultEngine;
+      el.engineBadge.className = 'pc-badge pc-badge--mono ' +
+        (state.lastData.degraded ? 'pc-badge--warning' : 'pc-badge--accent');
+      if (state.lastData.fallbackReason) {
+        const requested = ENGINE_LABELS[state.lastData.requestedEngine] || state.lastData.requestedEngine;
+        const sameProvider = state.lastData.engine === state.lastData.requestedEngine;
+        el.engineBadge.title = sameProvider && state.lastData.requestedModel
+          ? `${requested} (${state.lastData.requestedModel}) failed: ${state.lastData.fallbackReason}`
+          : `${requested} failed: ${state.lastData.fallbackReason}`;
+      } else {
+        el.engineBadge.title = state.lastData.model
+          ? `${ENGINE_LABELS[state.resultEngine] || state.resultEngine} (${state.lastData.model})`
+          : '';
+      }
+      el.engineBadge.hidden = false;
+    } else {
+      el.engineBadge.title = '';
+      el.engineBadge.hidden = true;
+    }
+    renderVariantChips();
+    renderTechChips(state.lastData?.techniques);
+    updateResultTabs(state.lastData, state.original);
+    editableCtrl.setEditable(Boolean(state.latest && !state.busy));
+    updateClearDraftVisibility();
+    resultActions.update({ ...actionState(), busy: state.busy });
+    if (statusText) setStatus(statusText, 'neutral');
+    scheduleSessionSave();
+  }
+
+  const editableCtrl = bindEditableResult({
+    element: el.resultText,
+    onSnapshot: () => pushUndoSnapshot(),
+    onEdit: editedText => {
+      state.latest = editedText;
+      if (state.lastData) state.lastData = { ...state.lastData, optimized: editedText };
+      renderVariantChips();
+      updateResultTabs(state.lastData, state.original);
+      updateClearDraftVisibility();
+      resultActions.update({ ...actionState(), busy: state.busy });
+      setStatus('Edited', 'neutral');
+      scheduleSessionSave();
+    }
+  });
+
+  /* Variant chips: clickable alternatives. Clicking one swaps the result on
+     screen (and everything that follows from it: copy, save, insert). */
+  function renderVariantChips() {
+    el.variantChips.innerHTML = '';
+    if (state.variants.length < 2) {
+      el.variantChips.hidden = true;
+      return;
+    }
+    const activeText = state.latest;
+    state.variants.forEach((variant, index) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      const active = variant.text === activeText;
+      btn.className = 'pc-badge pc-badge--mono pc-variant-chip' + (active ? ' pc-badge--accent' : '');
+      btn.textContent = `${String.fromCharCode(65 + index)} · ${variant.label || `Variant ${index + 1}`}`;
+      btn.title = 'Use this variant';
+      btn.setAttribute('aria-pressed', String(active));
+      btn.addEventListener('click', () => {
+        if (variant.text === state.latest) return;
+        pushUndoSnapshot();
+        state.latest = variant.text;
+        if (state.lastData) state.lastData = { ...state.lastData, optimized: state.latest };
+        el.resultText.textContent = variant.text;
+        updateResultTabs(state.lastData, state.original);
+        renderVariantChips();
+        resultActions.update({ ...actionState(), busy: state.busy });
+        scheduleSessionSave();
+      });
+      el.variantChips.appendChild(btn);
+    });
+    el.variantChips.hidden = false;
+  }
+
+  /* Refine / Continue / Undo under the result. Only model output supports
+     refinement; undo restores the previous snapshot whenever available. */
+  function actionState() {
+    const data = state.lastData;
+    const hasUndo = undoStack.canUndo();
+    return {
+      visible: Boolean(state.latest && (data || hasUndo)),
+      truncated: Boolean(data?.truncated),
+      canRefine: Boolean(state.latest && data && data.engine !== 'offline'),
+      canUndo: hasUndo
+    };
+  }
+
+  const resultActions = createResultActions({
+    onRefine: async kind => runRequest({
+      action: 'refine', kind, previous: state.latest, text: state.original, host: state.host || await activeTabHost()
+    }),
+    onCustomRefine: async instruction => runRequest({
+      action: 'refine', kind: 'custom', instruction, previous: state.latest, text: state.original, host: state.host || await activeTabHost()
+    }),
+    onContinue: async () => runRequest(
+      { action: 'refine', kind: 'continue', previous: state.latest, text: state.original, host: state.host || await activeTabHost() },
+      { base: state.latest }
+    ),
+    onUndo: () => {
+      const prev = undoStack.pop();
+      if (prev) restoreSnapshot(prev);
+    }
+  });
+  el.resultActionsSlot.appendChild(resultActions.element);
+
+  /** The tab the popup was opened over: its host tunes the rewrite. */
+  async function activeTab() {
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      return tab || null;
+    } catch {
+      return null;
+    }
+  }
+
+  async function activeTabHost() {
+    const tab = await activeTab();
+    if (!tab?.url) return null;
+    try {
+      const u = new URL(tab.url);
+      return u.protocol === 'https:' || u.protocol === 'http:' ? u.hostname : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async function refreshTargetBadge() {
+    const host = await activeTabHost();
+    state.host = host;
+    const profile = getTargetProfile(host);
+    if (profile) {
+      el.targetBadge.textContent = `For ${profile.name}`;
+      el.targetBadge.title = `Recognized ${profile.name} (${host}) — prompts are tailored for this AI`;
+      el.targetBadge.hidden = false;
+    } else {
+      el.targetBadge.hidden = true;
+      el.targetBadge.textContent = '';
+      el.targetBadge.title = '';
+    }
+  }
+
+  function updateResultTabs(data, original) {
+    const slot = el.resultTabsSlot;
+    if (!slot) return;
+    if (!el.resultTabsInstance) {
+      el.resultTabsInstance = createResultTabs({
+        container: slot,
+        resultText: state.latest || '',
+        originalText: original || '',
+        // Compare replaces the output box rather than stacking under it.
+        onTabChange: id => { el.resultText.closest('.pc-output__box').hidden = id === 'compare'; }
+      });
+    } else {
+      el.resultTabsInstance.refresh(state.latest || '', original || '', state.lastData);
+    }
+  }
+
+  function applyResult(data, original) {
+    stopWaitTimer();
+    state.lastData = data;
+    state.latest = data.optimized;
+    state.original = original;
+    state.resultEngine = data.engine || '';
+    state.resultFramework = data.framework || state.framework;
+    state.variants = Array.isArray(data.variants) ? data.variants : [];
+    showResult(state.latest);
+
+    el.engineBadge.textContent = ENGINE_LABELS[data.engine] || data.engine || '';
+    el.engineBadge.className = 'pc-badge pc-badge--mono ' +
+      (data.degraded ? 'pc-badge--warning' : 'pc-badge--accent');
+    el.engineBadge.hidden = !data.engine;
+    renderVariantChips();
+    renderTechChips(data.techniques);
+
+    if (data.degraded) {
+      el.engineBadge.title = '';
+      showDegraded(data);
+      setStatus('Offline fallback', 'warning');
+      toast('Fell back to the offline template', 'danger');
+      refreshSetupCard();
+    } else {
+      if (data.engine === 'nano') {
+        nanoStatus = { available: true, status: 'available' };
+        el.setupCard.hidden = true;
+      }
+      if (data.fallbackReason) {
+        /* Another configured provider or fallback model answered for the chosen one. */
+        const requested = ENGINE_LABELS[data.requestedEngine] || data.requestedEngine;
+        const used = ENGINE_LABELS[data.engine] || data.engine;
+        const sameProvider = data.engine === data.requestedEngine;
+        if (sameProvider) {
+          el.engineBadge.title = data.requestedModel && data.model
+            ? `${requested} (${data.requestedModel}) failed: ${data.fallbackReason}`
+            : `${requested} failed: ${data.fallbackReason}`;
+          setStatus(data.model ? `Used ${data.model}` : `Used ${used}`, 'warning');
+          toast(
+            data.model
+              ? `${data.requestedModel || requested} failed, used ${data.model}`
+              : `${requested} fallback used`,
+            'neutral'
+          );
+        } else {
+          el.engineBadge.title = `${requested} failed: ${data.fallbackReason}`;
+          setStatus(`Used ${used}`, 'warning');
+          toast(
+            `${requested} unavailable, used ${used}${data.model ? ` (${data.model})` : ''}`,
+            'neutral'
+          );
+        }
+      } else if (data.truncated) {
+        el.engineBadge.title = data.model ? `${ENGINE_LABELS[data.engine] || data.engine} (${data.model})` : '';
+        setStatus('Cut off', 'warning');
+        toast('The output was cut off. Press Continue to finish it.', 'neutral');
+      } else {
+        el.engineBadge.title = data.model ? `${ENGINE_LABELS[data.engine] || data.engine} (${data.model})` : '';
+        setStatus('Done', 'success');
+        toast(data.refinement ? 'Prompt refined' : 'Prompt optimized', 'success');
+      }
+    }
+    if (data.historyWarning) toast(data.historyWarning, 'neutral');
+    editableCtrl.setEditable(Boolean(state.latest && !state.busy));
+    updateClearDraftVisibility();
+    resultActions.update(actionState());
+    saveSession();
+  }
+
+  /**
+   * One streamed request. `base` is the text a Continue appends to; it stays on
+   * screen while the remainder streams in.
+   */
+  async function runRequest(payload, { base = '' } = {}) {
+    if (state.busy) return;
+    const isOptimize = !payload.action || payload.action === 'optimize';
+    const preRunSnapshot = currentSnapshot();
+    // A run streams into the output box, which Compare hides.
+    el.resultTabsInstance?.showTab('optimized');
+    setBusy(true);
+    saveSheet.close();
+    clarifySheet.close();
+    secretNotice.hide();
+    const waitLabel = isOptimize && state.variantCount > 1
+      ? `Generating ${state.variantCount} variants…`
+      : (isOptimize ? 'Optimizing…' : 'Refining…');
+    setStatus(waitLabel, 'neutral');
+    el.degradedNotice.hidden = true;
+    el.techChips.hidden = true;
+    el.variantChips.hidden = true;
+    resultActions.update({ visible: false });
+    if (isOptimize) {
+      state.variants = [];
+      if (!base) {
+        el.resultText.hidden = true;
+        el.resultPlaceholder.hidden = true;
+        startWaitTimer(waitLabel);
+      }
+    } else if (!base) {
+      startWaitTimer(waitLabel);
+    }
+
+    let streamed = base;
+    const paint = text => {
+      stopWaitTimer();
+      el.resultPlaceholder.hidden = true;
+      el.resultText.hidden = false;
+      el.resultText.textContent = text;
+      el.resultText.classList.add('is-streaming');
+    };
+    if (base) paint(base);
+
+    currentRun = startRun({ ...payload, engine: state.engine, frameworkId: state.framework }, {
+      onApproval: reviewSend,
+      onStart: (engine, model) => {
+        streamed = base;
+        const label = ENGINE_LABELS[engine] || engine;
+        const withModel = model ? `${label} (${model})` : label;
+        const engineWait = isOptimize && state.variantCount > 1
+          ? `${withModel} (${state.variantCount} variants)…`
+          : `${withModel}…`;
+        if (base) {
+          setStatus(engineWait, 'neutral');
+          paint(base);
+        } else {
+          setStatus(engineWait, 'neutral');
+          startWaitTimer(engineWait);
+        }
+      },
+      onToken: delta => {
+        streamed += delta;
+        paint(streamed);
+      },
+      onStatus: info => {
+        if (!state.busy) return;
+        const waitSec = info?.delayMs ? `${Math.max(1, Math.round(info.delayMs / 1000))}s` : '';
+        const why = info?.status === 429 ? 'Rate limited (429)' : (info?.reason || 'Retrying');
+        const msg = `${why}${waitSec ? `, retrying in ${waitSec}…` : ', retrying…'}`;
+        setStatus(msg, 'warning');
+        if (!streamed) startWaitTimer(msg, 'warning');
+      }
+    });
+
+    try {
+      const data = await currentRun.promise;
+      if (!data) {
+        stopWaitTimer();
+        if (preRunSnapshot) {
+          restoreSnapshot(preRunSnapshot, { statusText: 'Cancelled' });
+        } else {
+          el.resultText.hidden = true;
+          el.resultPlaceholder.hidden = false;
+          setStatus('Cancelled', 'neutral');
+        }
+        return;
+      }
+      if (preRunSnapshot) pushUndoSnapshot(preRunSnapshot);
+      if (payload.kind === 'custom') resultActions.clearCustomInput();
+      applyResult(data, isOptimize ? payload.text : state.original);
+    } catch (err) {
+      stopWaitTimer();
+      if (isOptimize) {
+        el.resultText.hidden = true;
+        el.resultPlaceholder.hidden = false;
+        el.resultPlaceholder.innerHTML = `
+          <span class="pc-empty__icon">${icon('alert', { size: 16 })}</span>
+          <span class="pc-empty__title">Optimization failed</span>
+          <span class="pc-empty__desc">${escapeHtml(err.message)}</span>`;
+      } else if (preRunSnapshot) {
+        // A failed refinement leaves the result it was refining untouched.
+        restoreSnapshot(preRunSnapshot, { statusText: '' });
+      }
+      setStatus('Failed', 'danger');
+      toast(err.message, 'danger');
+    } finally {
+      stopWaitTimer();
+      secretNotice.hide();
+      el.resultText.classList.remove('is-streaming');
+      currentRun = null;
+      setBusy(false);
+      resultActions.update(actionState());
+    }
+  }
+
+  /** Title and address of the active tab, when the user opted in. */
+  async function pageContext() {
+    if (!el.contextToggle.checked) return '';
+    const tab = await activeTab();
+    if (!tab?.url || !/^https?:/.test(tab.url)) return '';
+    const url = new URL(tab.url);
+    return [`Page title: ${tab.title || ''}`, `URL: ${url.origin}${url.pathname}`].join('\n');
+  }
+
+  async function optimize() {
+    const text = el.rawPrompt.value.trim();
+    if (!text) {
+      toast('Enter a prompt first', 'danger');
+      el.rawPrompt.focus();
+      return;
+    }
+    const host = (await activeTabHost()) || state.host || null;
+    state.host = host;
+    await refreshTargetBadge();
+    await runRequest({
+      action: 'optimize',
+      text,
+      host,
+      variantCount: state.variantCount,
+      context: await pageContext()
+    });
+  }
+
+  el.optimizeBtn.addEventListener('click', () => {
+    if (state.busy) { currentRun?.cancel(); return; }
+    optimize();
+  });
+
+  const secretNotice = createSendNotice({ labelForEngine: engine => ENGINE_LABELS[engine] });
+  el.secretSlot.appendChild(secretNotice.element);
+  el.rawPrompt.addEventListener('input', () => secretNotice.hide());
+
+  async function reviewSend(details) {
+    stopWaitTimer();
+    setStatus('Waiting for your approval', 'warning');
+    const approved = await secretNotice.ask(details);
+    if (approved) setStatus('Sending request…', 'neutral');
+    return approved;
+  }
+
+  /* Ask me first: questions, then the rewrite with the answers folded in. */
+  const clarifySheet = createClarifySheet({
+    idPrefix: 'popup-clarify',
+    onSubmit: answers => {
+      const next = withAnswers(el.rawPrompt.value, answers);
+      el.rawPrompt.value = next;
+      el.charCounter.textContent = String(next.length);
+      optimize();
+    },
+    onCancel: () => el.rawPrompt.focus()
+  });
+  el.clarifySlot.appendChild(clarifySheet.element);
+
+  el.askFirstBtn.addEventListener('click', async () => {
+    const text = el.rawPrompt.value.trim();
+    if (!text) {
+      toast('Enter a prompt first', 'danger');
+      el.rawPrompt.focus();
+      return;
+    }
+    if (state.busy) return;
+    setBusy(true);
+    setStatus('Thinking of questions…', 'neutral');
+    try {
+      currentRun = startRun({ action: 'clarify', text, engine: state.engine }, { onApproval: reviewSend });
+      const res = await currentRun.promise;
+      if (!res) { setStatus('Cancelled', 'neutral'); return; }
+      clarifySheet.open(res.questions, res.engine === 'offline' ? 'Questions suggested on this device.' : '');
+      setStatus('Ready', 'neutral');
+    } catch (err) {
+      setStatus('Failed', 'danger');
+      toast(err.message, 'danger');
+    } finally {
+      secretNotice.hide();
+      currentRun = null;
+      setBusy(false);
+    }
+  });
+
+  /* Page context: opt-in, remembered. */
+  el.contextToggle.checked = Boolean(settings.includePageContext);
+  el.contextToggle.addEventListener('change', () =>
+    writeUserData('saveSettings', { includePageContext: el.contextToggle.checked }));
+
+  el.rawPrompt.addEventListener('keydown', e => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+      e.preventDefault();
+      el.optimizeBtn.click();
+    }
+  });
+
+  /* ------------------------------------------------------------- Library */
+  /* Saved prompts, with a fill-in form for {{variables}}. The chosen text
+     becomes the result on screen, ready to copy. */
+  const libraryPicker = createLibraryPicker({
+    idPrefix: 'popup-lib',
+    getEntries: getLibrary,
+    onClose: () => {
+      el.libraryToggle.setAttribute('aria-pressed', 'false');
+      el.libraryToggle.classList.remove('is-active');
+    },
+    onUse: (text, entry) => {
+      setLibraryOpen(false);
+      pushUndoSnapshot();
+      stopWaitTimer();
+      state.lastData = null;
+      state.latest = text;
+      state.original = entry.original || '';
+      state.resultEngine = entry.engine || '';
+      state.resultFramework = entry.framework || '';
+      state.variants = [];
+      el.degradedNotice.hidden = true;
+      el.engineBadge.hidden = true;
+      el.variantChips.hidden = true;
+      el.techChips.hidden = true;
+      showResult(text);
+      editableCtrl.setEditable(Boolean(state.latest && !state.busy));
+      updateClearDraftVisibility();
+      resultActions.update(actionState());
+      setStatus(`Loaded "${entry.title}"`, 'neutral');
+      toast('Saved prompt ready to copy', 'success');
+      scheduleSessionSave();
+    }
+  });
+  el.librarySlot.appendChild(libraryPicker.element);
+
+  function setLibraryOpen(open) {
+    if (!open) { libraryPicker.close(); return; }
+    setHistoryOpen(false);
+    libraryPicker.open();
+    el.libraryToggle.setAttribute('aria-pressed', 'true');
+    el.libraryToggle.classList.add('is-active');
+  }
+  el.libraryToggle.addEventListener('click', () => setLibraryOpen(!libraryPicker.isOpen()));
+
+  /* ------------------------------------------------------------ Engine setup */
+  /* When nothing but the offline template can run (Nano missing, no key), say
+     so up front and let the user fix it here instead of hunting in Options. */
+  const KEY_LINKS = {
+    openrouter: 'https://openrouter.ai/keys',
+    gemini: 'https://aistudio.google.com/apikey',
+    openai: 'https://platform.openai.com/api-keys',
+    anthropic: 'https://console.anthropic.com/settings/keys'
+  };
+  const setupProvider = createSelect({
+    options: engineOptions().filter(o => KEY_LINKS[o.value]).map(o => ({ ...o, desc: o.value === 'openrouter' ? 'Free models' : '' })),
+    value: 'openrouter',
+    label: 'Provider',
+    onChange: v => { el.setupKeyLink.href = KEY_LINKS[v]; }
+  });
+  el.setupKeyLink.href = KEY_LINKS.openrouter;
+  el.setupProviderSlot.appendChild(setupProvider.element);
+
+  let nanoStatus = null;
+  async function refreshSetupCard({ probe = false } = {}) {
+    const s = await getSettings();
+    const hasKey = Object.keys(KEY_LINKS).some(id => String(s[`${id}ApiKey`] || '').trim());
+    const omniReady = Boolean(s.omnirouteEnabled || String(s.omnirouteApiKey || '').trim());
+    if (s.preferredEngine === 'offline' || hasKey || omniReady || s.setupDismissed) {
+      el.setupCard.hidden = true;
+      return;
+    }
+
+    if (typeof globalThis.LanguageModel === 'undefined') {
+      nanoStatus = { available: false, status: 'unsupported' };
+    } else if (probe) {
+      nanoStatus = await checkBuiltInPromptApiStatus();
+    }
+
+    if (nanoStatus?.available) {
+      el.setupCard.hidden = true;
+      await writeUserData('saveSettings', { setupDismissed: true });
+      return;
+    }
+
+    el.setupCard.hidden = false;
+    if (!nanoStatus) {
+      el.setupCheckBtn.hidden = false;
+      el.setupDownloadBtn.hidden = true;
+      el.setupText.textContent =
+        'Check whether Chrome\'s on-device model is ready, add an API key (OpenRouter has free models), or configure OmniRoute in Options.';
+      return;
+    }
+
+    el.setupCheckBtn.hidden = true;
+    el.setupDownloadBtn.hidden = nanoStatus.status !== 'downloadable';
+    if (nanoStatus.status === 'downloadable') {
+      el.setupText.textContent =
+        'Chrome can run a private on-device model, but it is not downloaded yet. Download it once, add an API key, or configure OmniRoute in Options.';
+    } else if (nanoStatus.status === 'downloading') {
+      el.setupText.textContent =
+        'Chrome\'s on-device model is currently downloading. Check chrome://components, add an API key, or configure OmniRoute in Options.';
+    } else if (nanoStatus.status === 'error' && /feature flag|gating model execution/i.test(nanoStatus.error || '')) {
+      el.setupText.textContent =
+        'Chrome\'s on-device model execution flag is disabled. Enable the flags in Options, add an API key below, or configure OmniRoute.';
+    } else {
+      el.setupText.textContent =
+        'Chrome\'s on-device model is not available in this browser, so rewrites use a basic template. Add a key from any provider (OpenRouter has free models) or configure OmniRoute in Options.';
+    }
+  }
+
+  el.setupCheckBtn.addEventListener('click', async () => {
+    el.setupCheckBtn.disabled = true;
+    el.setupCheckBtn.lastElementChild.textContent = 'Checking…';
+    try {
+      await refreshSetupCard({ probe: true });
+      if (nanoStatus?.available) {
+        toast('On-device Gemini Nano is ready', 'success');
+      }
+    } finally {
+      el.setupCheckBtn.disabled = false;
+      el.setupCheckBtn.lastElementChild.textContent = 'Check Chrome Nano';
+    }
+  });
+
+  el.setupSaveBtn.addEventListener('click', async () => {
+    const provider = setupProvider.getValue();
+    const key = el.setupKey.value.trim();
+    if (!key) {
+      toast('Paste a key first', 'danger');
+      el.setupKey.focus();
+      return;
+    }
+    el.setupSaveBtn.disabled = true;
+    el.setupSaveBtn.textContent = 'Testing…';
+    try {
+      await verifyProvider(provider, { apiKey: key, model: PROVIDER_DEFAULTS[provider]?.model });
+      await writeUserData('saveSettings', { [`${provider}ApiKey`]: key, preferredEngine: provider });
+      state.engine = provider;
+      engineSelect.setValue(provider, { silent: true });
+      el.setupKey.value = '';
+      el.setupCard.hidden = true;
+      toast(`${ENGINE_LABELS[provider]} connected`, 'success');
+    } catch (err) {
+      toast(err.message, 'danger');
+    } finally {
+      el.setupSaveBtn.disabled = false;
+      el.setupSaveBtn.textContent = 'Test and save';
+    }
+  });
+
+  el.setupDismissBtn.addEventListener('click', async () => {
+    el.setupCard.hidden = true;
+    await writeUserData('saveSettings', { setupDismissed: true });
+  });
+
+  /* Downloading Nano needs a user gesture: this click. */
+  el.setupDownloadBtn.addEventListener('click', async () => {
+    const LM = globalThis.LanguageModel;
+    if (!LM || typeof LM.create !== 'function') return;
+    el.setupDownloadBtn.disabled = true;
+    setStatus('Downloading on-device model…', 'neutral');
+    try {
+      const session = await LM.create({
+        ...NANO_SESSION_OPTIONS,
+        monitor(m) {
+          m.addEventListener('downloadprogress', ev => {
+            const loaded = Number(ev?.loaded ?? 0);
+            const total = Number(ev?.total ?? 0);
+            const pct = total > 0 ? Math.round((loaded / total) * 100) : Math.round(loaded * 100);
+            const clamped = Math.max(0, Math.min(100, pct));
+            el.setupDownloadBtn.lastElementChild.textContent = `Downloading… ${clamped}%`;
+            setStatus(`Downloading on-device model… ${clamped}%`, 'neutral');
+          });
+        }
+      });
+      try { session?.destroy?.(); } catch {}
+      nanoStatus = { available: true, status: 'available' };
+      await writeUserData('saveSettings', { preferredEngine: 'nano', setupDismissed: true });
+      state.engine = 'nano';
+      engineSelect.setValue('nano', { silent: true });
+      setStatus('On-device model ready', 'success');
+      toast('On-device model ready', 'success');
+      await refreshSetupCard();
+    } catch (err) {
+      const msg = err?.message || String(err);
+      setStatus('Download failed', 'danger');
+      toast(
+        /feature flag|gating model execution/i.test(msg)
+          ? 'Browser model execution flag is disabled — check Settings'
+          : `Download failed: ${msg}`,
+        'danger'
+      );
+      if (/feature flag|gating model execution/i.test(msg)) {
+        nanoStatus = { available: false, status: 'error', error: msg };
+        await refreshSetupCard();
+      }
+    } finally {
+      el.setupDownloadBtn.disabled = false;
+      el.setupDownloadBtn.lastElementChild.textContent = 'Download Chrome\'s on-device model';
+    }
+  });
+
+  /* ---------------------------------------------------------------- Copy */
+  el.copyBtn.addEventListener('click', async () => {
+    if (!state.latest) {
+      toast('Nothing to copy yet', 'danger');
+      return;
+    }
+    await navigator.clipboard.writeText(state.latest);
+    el.copyBtn.innerHTML = `${icon('check', { size: 13 })}<span>Copied</span>`;
+    toast('Copied to clipboard', 'success');
+    setTimeout(() => {
+      el.copyBtn.innerHTML = `${icon('copy', { size: 13 })}<span>Copy</span>`;
+    }, 1800);
+  });
+
+  /* ---------------------------------------------------------------- Save */
+  /* Saves the result on screen to the library, with a name and labels. The
+     library itself is managed in Options. */
+  const saveSheet = createSaveSheet({
+    idPrefix: 'popup-save',
+    getSuggestions: async () => collectLabels(await getLibrary()),
+    onSave: async ({ title, labels }) => {
+      await writeUserData('saveToLibrary', {
+        title,
+        labels,
+        text: state.latest,
+        original: state.original,
+        framework: state.resultFramework,
+        engine: state.resultEngine
+      });
+      toast('Saved to library', 'success');
+    }
+  });
+  el.saveSlot.appendChild(saveSheet.element);
+
+  el.saveBtn.addEventListener('click', () => {
+    if (!state.latest) {
+      toast('Nothing to save yet', 'danger');
+      return;
+    }
+    if (saveSheet.isOpen()) {
+      saveSheet.close();
+      return;
+    }
+    // Name it after the draft: rewrites mostly open with "You are an expert…".
+    saveSheet.open({ title: deriveTitle(state.original || state.latest) });
+  });
+
+  /* -------------------------------------------------------- Per-site opt-in */
+  /* The floating button is automatic on the AI sites listed in the manifest.
+     Anywhere else it is opt-in, one origin at a time, and the browser asks for
+     that origin's permission — nothing is requested up front. */
+  const builtInMatches = chrome.runtime.getManifest().content_scripts.flatMap(c => c.matches);
+
+  function toOrigin(url) {
+    try {
+      const u = new URL(url);
+      return u.protocol === 'https:' || u.protocol === 'http:' ? u.origin : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async function initSiteRow() {
+    let tab;
+    try {
+      [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    } catch {
+      return;
+    }
+    // `tab.url` is only present when the extension may see this page.
+    const origin = toOrigin(tab?.url);
+    if (!origin) return;
+
+    const host = new URL(origin).host;
+    el.siteRow.hidden = false;
+
+    if (builtInMatches.includes(`${origin}/*`)) {
+      el.siteText.textContent = `Optimize button is on for ${host}`;
+      return;
+    }
+
+    let enabled = (await getSites()).includes(origin);
+    const control = origin === GMAIL_ORIGIN ? 'Gmail reply button' : 'Optimize button';
+    const render = () => {
+      el.siteText.textContent = enabled
+        ? `${control} is on for ${host}`
+        : `${control} is off for ${host}`;
+      el.siteToggle.textContent = enabled ? 'Turn off' : 'Turn on';
+      el.siteToggle.hidden = false;
+    };
+    render();
+
+    el.siteToggle.addEventListener('click', async () => {
+      el.siteToggle.disabled = true;
+      try {
+        if (!enabled) {
+          // permissions.request needs the user gesture of this click, so it must
+          // be the first thing awaited here.
+          const granted = await chrome.permissions.request({ origins: [`${origin}/*`] });
+          if (!granted) {
+            toast('Permission was not granted', 'danger');
+            return;
+          }
+          const res = await chrome.runtime.sendMessage({ type: 'ENABLE_SITE', origin, tabId: tab.id });
+          if (!res?.success) throw new Error(res?.error || 'Could not enable this site.');
+          enabled = true;
+          toast(`Enabled on ${host}`, 'success');
+        } else {
+          const res = await chrome.runtime.sendMessage({ type: 'DISABLE_SITE', origin });
+          if (!res?.success) throw new Error(res?.error || 'Could not disable this site.');
+          enabled = false;
+          toast(`Turned off on ${host}`, 'success');
+        }
+        render();
+      } catch (err) {
+        toast(err.message, 'danger');
+      } finally {
+        el.siteToggle.disabled = false;
+      }
+    });
+  }
+  initSiteRow();
+  refreshTargetBadge();
+
+  /* ------------------------------------------------------------ First run */
+  function setOnboardingVisible(visible) {
+    el.onboardingView.hidden = !visible;
+    el.frameworkBar.hidden = visible;
+    el.mainView.hidden = visible;
+  }
+
+  async function finishOnboarding() {
+    setOnboardingVisible(false);
+    await writeUserData('saveSettings', { onboardingComplete: true });
+    await refreshSetupCard();
+    el.rawPrompt.focus();
+  }
+
+  el.onboardingStart.addEventListener('click', finishOnboarding);
+
+  setStatus('Ready', 'neutral');
+
+  async function restoreSession() {
+    if (!chrome.storage?.session) return;
+    try {
+      const stored = await chrome.storage.session.get(SESSION_KEY);
+      const snap = stored?.[SESSION_KEY];
+      if (!snap) return;
+      if (!snap.rawPrompt && !snap.latest && !(Array.isArray(snap.undoStack) && snap.undoStack.length)) return;
+      if (snap.framework && valid(snap.framework)) {
+        state.framework = snap.framework;
+        renderFrameworkTabs();
+      }
+      el.rawPrompt.value = snap.rawPrompt || '';
+      el.charCounter.textContent = String(el.rawPrompt.value.length);
+      undoStack.load(snap.undoStack);
+      if (snap.latest) {
+        restoreSnapshot({
+          text: snap.latest,
+          original: snap.original || '',
+          engine: snap.resultEngine || '',
+          framework: snap.resultFramework || state.framework,
+          data: snap.lastData || null,
+          variants: snap.variants || []
+        }, { statusText: 'Session restored' });
+      } else {
+        updateClearDraftVisibility();
+        resultActions.update(actionState());
+      }
+    } catch {}
+  }
+
+  /* Text handed over by the service worker when the page it came from cannot
+     host the in-page modal (chrome://, the Web Store, the PDF viewer). */
+  const pending = await takePendingPrompt();
+  if (pending) {
+    chrome.action.setBadgeText({ text: '' });
+    chrome.action.setTitle({ title: 'PromptOptimizer' });
+  }
+
+  if (pending?.text) {
+    setOnboardingVisible(false);
+    el.rawPrompt.value = pending.text;
+    el.charCounter.textContent = String(pending.text.length);
+    updateClearDraftVisibility();
+    scheduleSessionSave();
+    el.rawPrompt.focus();
+    if (pending.autoRun) el.optimizeBtn.click();
+  } else if (!settings.onboardingComplete) {
+    setOnboardingVisible(true);
+  } else {
+    await restoreSession();
+    el.rawPrompt.focus();
+  }
+  if (settings.onboardingComplete || pending?.text) refreshSetupCard();
+});

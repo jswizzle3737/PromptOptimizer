@@ -1,0 +1,59 @@
+/* Matches the Options app bar (options.css .pc-appbar). */
+.reply-appbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  height: 60px;
+  padding: 0 var(--space-6);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+}
+.reply-workspace { max-width: 1150px; margin: 0 auto; padding: var(--space-8) var(--space-6); }
+.reply-heading { margin-bottom: var(--space-6); }
+.reply-heading h1 { font-size: var(--text-2xl); margin: 0 0 var(--space-2); }
+.reply-heading p, .reply-panel p { margin: 0; }
+.reply-heading p { color: var(--text-secondary); }
+.reply-grid { display: grid; grid-template-columns: minmax(240px, 340px) minmax(0, 1fr); gap: var(--space-5); align-items: start; }
+.reply-flow, .reply-panel { display: grid; gap: var(--space-4); min-width: 0; }
+.reply-panel { padding: var(--space-5); background: var(--bg-surface); border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); }
+.reply-panel h2 { font-size: var(--text-lg); margin: 0; }
+.reply-panel textarea { width: 100%; resize: vertical; }
+.reply-actions, .reply-result-header, .reply-sample-row { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-3); }
+.reply-actions { align-items: end; }
+.reply-actions .pc-field { flex: 1 1 220px; min-width: 0; }
+.reply-result-header { justify-content: space-between; }
+.reply-samples { list-style: none; padding: 0; margin: 0; }
+.reply-sample-row { justify-content: space-between; padding-block: var(--space-2); border-bottom: 1px solid var(--border-subtle); }
+.reply-sample-row label { display: flex; gap: var(--space-2); align-items: center; overflow-wrap: anywhere; }
+/* The native file control, dressed as the app's secondary button beside a
+   muted "No file chosen". */
+.reply-file {
+  max-width: 100%;
+  height: auto;
+  padding: var(--space-2);
+  color: var(--text-tertiary);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+.reply-file::file-selector-button {
+  height: 30px;
+  margin-right: var(--space-3);
+  padding: 0 var(--space-3);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  background: var(--bg-raised);
+  box-shadow: var(--shadow-1);
+  font: inherit;
+  font-weight: var(--weight-semibold);
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard);
+}
+.reply-file:hover::file-selector-button { background: var(--bg-hover); border-color: var(--border-strong); }
+.reply-status:empty, #reply-approval:empty, .reply-samples:empty { display: none; }
+.reply-status[data-error="true"] { color: var(--danger-fg); }
+@media (max-width: 740px) {
+  .reply-grid { grid-template-columns: minmax(0, 1fr); }
+  .reply-workspace { padding: var(--space-5) var(--space-3); }
+}
