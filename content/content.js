@@ -14,7 +14,8 @@
   window.__promptcraft_loaded = true;
   if (!document.body) return; // XML documents and similar have nothing to attach to
 
-  const SHARED = chrome.runtime.getURL('shared/');
+  // One getURL per file: with use_dynamic_url only listed files get the per-session id.
+  const SHARED = name => chrome.runtime.getURL('shared/' + name);
   const LOGO_URL = chrome.runtime.getURL('assets/logo.png');
 
   /* The service worker injects this script on demand (context menu, keyboard
@@ -338,7 +339,7 @@
   async function loadSharedCss() {
     const names = ['theme.css', 'base.css', 'components.css'];
     const parts = await Promise.all(
-      names.map(n => fetch(SHARED + n).then(r => {
+      names.map(n => fetch(SHARED(n)).then(r => {
         if (!r.ok) throw new Error(`${n}: HTTP ${r.status}`);
         return r.text();
       }))
@@ -348,17 +349,17 @@
 
   async function loadModules() {
     const [icons, select, themePicker, engines, saveSheet, library, runClient, assist, clarify, targetProfiles, pcoControls] = await Promise.all([
-        import(SHARED + 'icons.js'),
-        import(SHARED + 'select.js'),
-        import(SHARED + 'theme-picker.js'),
-        import(SHARED + 'engines.js'),
-        import(SHARED + 'save-sheet.js'),
-        import(SHARED + 'library.js'),
-        import(SHARED + 'run-client.js'),
-        import(SHARED + 'assist.js'),
-        import(SHARED + 'clarify.js'),
-        import(SHARED + 'target-profiles.js'),
-        import(SHARED + 'pco-controls.js')
+        import(SHARED('icons.js')),
+        import(SHARED('select.js')),
+        import(SHARED('theme-picker.js')),
+        import(SHARED('engines.js')),
+        import(SHARED('save-sheet.js')),
+        import(SHARED('library.js')),
+        import(SHARED('run-client.js')),
+        import(SHARED('assist.js')),
+        import(SHARED('clarify.js')),
+        import(SHARED('target-profiles.js')),
+        import(SHARED('pco-controls.js'))
     ]);
     return { icons, select, themePicker, engines, saveSheet, library, runClient, assist, clarify, targetProfiles, pcoControls };
   }

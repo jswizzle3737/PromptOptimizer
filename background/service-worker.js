@@ -183,6 +183,22 @@ function toOrigin(value) {
   }
 }
 
+/**
+ * True when a message comes from one of this extension's own pages (popup,
+ * Options, Email replies), optionally a specific one. Compares origins rather
+ * than runtime.getURL strings, so it holds however getURL formats its result
+ * (web-accessible resources use a per-session dynamic id).
+ */
+function isOwnPage(sender, pathname) {
+  try {
+    const url = new URL(sender?.url || '');
+    return sender.id === chrome.runtime.id && url.origin === self.location.origin &&
+      (!pathname || url.pathname === pathname);
+  } catch {
+    return false;
+  }
+}
+
 /** Gmail gets the reply button; every other opted-in site gets the Optimize button. */
 function siteFiles(origin) {
   return origin === GMAIL_ORIGIN
@@ -315,7 +331,7 @@ async function runRequest(payload = {}, sender, io = {}) {
       toOrigin(sender.url) !== GMAIL_ORIGIN || !(await getSites()).includes(GMAIL_ORIGIN))) {
     throw new Error('Turn on the Gmail reply button from the PromptOptimizer toolbar.');
   }
-  if (action === 'draft-email' && sender?.url !== chrome.runtime.getURL('options/email-reply.html')) {
+  if (action === 'draft-email' && !isOwnPage(sender, '/options/email-reply.html')) {
     throw new Error('Open Email replies from the extension to draft a reply.');
   }
   const task = gmail && EMAIL_TASKS.includes(payload.task) ? payload.task : 'reply';
@@ -467,7 +483,7 @@ const USER_WRITES = new Map([
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   (async () => {
     try {
-      if (PAGE_ONLY.has(message.type) && sender.tab && !sender.url?.startsWith(chrome.runtime.getURL(''))) {
+      if (PAGE_ONLY.has(message.type) && sender.tab && !isOwnPage(sender)) {
         throw new Error('Not allowed from a web page.');
       }
 

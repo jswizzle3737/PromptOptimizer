@@ -14,6 +14,20 @@ $env:ELECTRON_RUN_AS_NODE=1; & "$env:LOCALAPPDATA\Programs\Microsoft VS Code\Cod
 |---|---|
 | `node selftest.mjs` | Engine, storage migrations, email tasks, icons, secret detection |
 | `node tools/check-contrast.cjs` | Every theme's text, accent and status colors meet WCAG AA (exits 1 on a failure) |
+| `node tools/check-extension-load.cjs [chrome.exe]` | Loads the real extension in headless Chromium and imports every web-accessible module from a content script (exits 1 on a failure). Uses Playwright's Chromium by default; branded Chrome ignores `--load-extension`. |
+
+### Why `use_dynamic_url` is off
+
+It would stop websites from detecting the extension by probing
+`chrome-extension://<id>/shared/…`. In Chromium 149 it also breaks every shared
+module that imports a sibling (`select.js`, `assist.js`, `pco-controls.js`,
+`save-sheet.js`, `theme-picker.js`) when loaded from a content script, so the in-page
+panel and the Gmail tools would fail. `check-extension-load.cjs` reports 13/18 with it
+on. The code is otherwise ready: every resource URL comes from `runtime.getURL` per
+file, and the worker's sender checks compare origins. To enable it later, bundle the
+shared modules (no relative imports) or re-run the check on a newer Chromium, then
+add `"use_dynamic_url": true` to the manifest entry and raise
+`minimum_chrome_version` to 131.
 
 ## Preview the pages without installing
 
