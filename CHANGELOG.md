@@ -12,6 +12,7 @@
 - **Emoji icons for optimizer types.** One icon picker offers emoji and the stroke icons side by side, plus a box for any emoji.
 - **"Don't ask again until Chrome restarts"** on the send approval for Gmail tools and Email replies. It is never offered when a request may contain a credential or when a fallback provider is about to be used.
 - **Developer tools** in `tools/`: a preview server for every page, a WCAG contrast check for all themes, a real-Chromium load check, and an end-to-end approval test. See `tools/README.md`.
+- **Packaging and releases**: `tools/package.cjs` builds the Chrome Web Store zip. Pushing a `v*` tag publishes a GitHub Release with the zip attached, and every push runs the checks.
 
 ### Changed
 - Your email writing style is stored in extension storage so Gmail can use it. A style saved by an earlier version moves over the next time you open Email replies.

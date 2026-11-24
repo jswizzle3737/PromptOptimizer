@@ -1,0 +1,60 @@
+name: Release
+
+# Push a tag like v1.7.0 to publish a GitHub Release with the Chrome Web Store
+# zip attached. The tag must match manifest.json's version.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Check, package and publish
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "26"
+
+      - name: Tag matches the manifest version
+        run: |
+          version="$(node -p "require('./manifest.json').version")"
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match manifest version $version"
+            exit 1
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Self-test and contrast check
+        run: |
+          node selftest.mjs
+          node tools/check-contrast.cjs
+
+      - name: Package
+        run: |
+          command -v zip >/dev/null || { sudo apt-get update && sudo apt-get install -y zip; }
+          node tools/package.cjs
+
+      - name: Release notes from CHANGELOG.md
+        run: |
+          awk -v v="$VERSION" '
+            $0 ~ "^## " v "( |$)" { on = 1; next }
+            on && /^## / { exit }
+            on { print }
+          ' CHANGELOG.md > release-notes.md
+          test -s release-notes.md || echo "PromptOptimizer $VERSION" > release-notes.md
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" "dist/promptoptimizer-$VERSION.zip" \
+            --title "PromptOptimizer $VERSION" \
+            --notes-file release-notes.md \
+            --verify-tag

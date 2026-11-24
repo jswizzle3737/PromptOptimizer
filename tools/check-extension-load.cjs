@@ -2,7 +2,9 @@
 // module from a content script (the isolated world the in-page panel and the
 // Gmail tools run in). Exits 1 if any module or stylesheet fails to load.
 //
-//   node tools/check-extension-load.cjs [path/to/chrome.exe]
+//   node tools/check-extension-load.cjs [path/to/chrome.exe] [--from <unpacked dir>]
+//
+// --from checks another unpacked copy, e.g. the extracted release zip.
 //
 // Without a path it uses the newest Playwright Chromium under
 // %LOCALAPPDATA%\ms-playwright. Branded Chrome ignores --load-extension.
@@ -14,11 +16,13 @@ const http = require('http');
 const os = require('os');
 const path = require('path');
 
-const root = path.resolve(__dirname, '..');
+const args = process.argv.slice(2);
+const fromAt = args.indexOf('--from');
+const root = fromAt >= 0 ? path.resolve(args.splice(fromAt, 2)[1]) : path.resolve(__dirname, '..');
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 function findChromium() {
-  if (process.argv[2]) return process.argv[2];
+  if (args[0]) return args[0];
   const base = path.join(process.env.LOCALAPPDATA || '', 'ms-playwright');
   const dirs = fs.existsSync(base) ? fs.readdirSync(base).filter(d => /^chromium-\d+$/.test(d)).sort().reverse() : [];
   for (const d of dirs) {

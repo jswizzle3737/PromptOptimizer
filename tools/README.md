@@ -18,6 +18,17 @@ $env:ELECTRON_RUN_AS_NODE=1; & "$env:LOCALAPPDATA\Programs\Microsoft VS Code\Cod
 
 | `node tools/e2e-email-approval.cjs [chrome.exe]` | End-to-end in headless Chromium: the Email replies page asks before sending, "Don't ask again" skips the next notice, a credential warning always asks, and Cancel sends nothing. Uses a local fake OmniRoute gateway; nothing leaves the machine. |
 
+## Releasing
+
+1. Bump `version` in `manifest.json` and add a `## <version>` section to `CHANGELOG.md`.
+2. `node tools/package.cjs` builds `dist/promptoptimizer-<version>.zip` (only the files Chrome loads)
+   and fails if anything the manifest or a page references is missing. To prove the zip itself loads,
+   extract it and run `node tools/check-extension-load.cjs --from <extracted folder>`.
+3. Commit, then tag and push: `git tag v<version>` and `git push origin v<version>`.
+   `.github/workflows/release.yml` runs the checks, rebuilds the zip and publishes a GitHub Release
+   with that changelog section as notes and the zip attached.
+4. Upload the zip in the Chrome Web Store developer dashboard.
+
 ### Why `use_dynamic_url` is off
 
 It would stop websites from detecting the extension by probing

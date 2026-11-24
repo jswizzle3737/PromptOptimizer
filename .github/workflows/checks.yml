@@ -1,0 +1,33 @@
+name: Checks
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: Self-test, contrast and package
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "26"
+
+      - name: Self-test
+        run: node selftest.mjs
+
+      - name: Theme contrast (WCAG AA)
+        run: node tools/check-contrast.cjs
+
+      - name: Package builds
+        run: |
+          command -v zip >/dev/null || { sudo apt-get update && sudo apt-get install -y zip; }
+          node tools/package.cjs
