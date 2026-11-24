@@ -284,6 +284,10 @@ export function createSendNotice({ labelForEngine } = {}) {
     <div class="pc-callout__body">
       <span class="pc-callout__title"></span>
       <span class="pc-callout__text"></span>
+      <label class="pc-secret-notice__remember" hidden>
+        <input type="checkbox" data-act="remember">
+        <span></span>
+      </label>
       <button type="button" class="pc-btn pc-btn--ghost pc-btn--sm pc-btn--danger-text" data-act="send">Send anyway</button>
       <button type="button" class="pc-btn pc-btn--ghost pc-btn--sm" data-act="cancel">Cancel</button>
     </div>
@@ -292,11 +296,15 @@ export function createSendNotice({ labelForEngine } = {}) {
   const title = root.querySelector('.pc-callout__title');
   const send = root.querySelector('[data-act="send"]');
   const cancel = root.querySelector('[data-act="cancel"]');
+  const rememberRow = root.querySelector('.pc-secret-notice__remember');
+  const rememberBox = root.querySelector('[data-act="remember"]');
   let resolveApproval = null;
   let returnFocus = null;
+  let lastRemember = false;
 
   function settle(approved) {
     root.hidden = true;
+    lastRemember = approved && !rememberRow.hidden && rememberBox.checked;
     const resolve = resolveApproval;
     resolveApproval = null;
     if (returnFocus?.isConnected) returnFocus.focus({ preventScroll: true });
@@ -316,9 +324,16 @@ export function createSendNotice({ labelForEngine } = {}) {
   });
   return {
     element: root,
-    ask({ engine, model, origin, secrets = [], fallback, email }) {
+    /** Resolves true or false. `remembered()` then says whether "don't ask again" was ticked. */
+    ask({ engine, model, origin, secrets = [], fallback, email, rememberable = false }) {
       settle(false);
       const provider = labelForEngine?.(engine) || engine;
+      // Offered only when the worker allows it: never with a credential warning or a fallback.
+      rememberRow.hidden = !rememberable || secrets.length > 0 || Boolean(fallback);
+      rememberBox.checked = false;
+      // `rememberable` names the surface it applies to, e.g. 'Gmail'.
+      const where = typeof rememberable === 'string' ? ` in ${rememberable}` : '';
+      rememberRow.querySelector('span').textContent = `Don't ask again for ${provider}${where} until Chrome restarts`;
       const destination = [provider, model, origin].filter(Boolean).join(' · ');
       // `email` is true (Email replies page) or a sentence saying what is sent (Gmail).
       const scoped = typeof email === 'string';
@@ -335,6 +350,7 @@ export function createSendNotice({ labelForEngine } = {}) {
       root.scrollIntoView({ block: 'nearest' });
       return new Promise(resolve => { resolveApproval = resolve; });
     },
+    remembered: () => lastRemember,
     hide() { settle(false); }
   };
 }

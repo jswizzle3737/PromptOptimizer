@@ -16,6 +16,8 @@ $env:ELECTRON_RUN_AS_NODE=1; & "$env:LOCALAPPDATA\Programs\Microsoft VS Code\Cod
 | `node tools/check-contrast.cjs` | Every theme's text, accent and status colors meet WCAG AA (exits 1 on a failure) |
 | `node tools/check-extension-load.cjs [chrome.exe]` | Loads the real extension in headless Chromium and imports every web-accessible module from a content script (exits 1 on a failure). Uses Playwright's Chromium by default; branded Chrome ignores `--load-extension`. |
 
+| `node tools/e2e-email-approval.cjs [chrome.exe]` | End-to-end in headless Chromium: the Email replies page asks before sending, "Don't ask again" skips the next notice, a credential warning always asks, and Cancel sends nothing. Uses a local fake OmniRoute gateway; nothing leaves the machine. |
+
 ### Why `use_dynamic_url` is off
 
 It would stop websites from detecting the extension by probing

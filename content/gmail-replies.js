@@ -373,7 +373,8 @@
           async onApproval(details) {
             if (!canContinue() || !sameThread()) return false;
             status.textContent = 'Waiting for approval.';
-            return (await notice.ask(details)) && canContinue() && sameThread();
+            const approved = (await notice.ask(details)) && canContinue() && sameThread();
+            return { approved, remember: approved && notice.remembered() };
           }
         });
         const result = await currentJob.run.promise;

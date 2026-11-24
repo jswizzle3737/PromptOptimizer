@@ -27,9 +27,11 @@ export function startRun(payload, { onStart, onToken, onStatus, onApproval } = {
     else if (msg?.type === 'token') onToken?.(msg.delta);
     else if (msg?.type === 'status') onStatus?.(msg);
     else if (msg?.type === 'approval') {
+      // onApproval returns true/false, or { approved, remember } to skip the
+      // same provider's notice for the rest of the browser session.
       Promise.resolve().then(() => onApproval?.(msg.details)).then(
-        approved => replyToApproval(msg.id, approved === true),
-        () => replyToApproval(msg.id, false)
+        answer => replyToApproval(msg.id, answer === true || answer?.approved === true, answer?.remember === true),
+        () => replyToApproval(msg.id, false, false)
       );
     }
     else if (msg?.type === 'done') finish(resolveRun, msg.data);
@@ -40,9 +42,9 @@ export function startRun(payload, { onStart, onToken, onStatus, onApproval } = {
     finish(rejectRun, new Error('The extension stopped responding. Reload the page and try again.')));
   port.postMessage({ type: 'start', payload });
 
-  function replyToApproval(id, approved) {
+  function replyToApproval(id, approved, remember) {
     if (settled) return;
-    try { port.postMessage({ type: 'approval', id, approved }); } catch { /* already closed */ }
+    try { port.postMessage({ type: 'approval', id, approved, remember: approved && remember }); } catch { /* already closed */ }
   }
 
   return {

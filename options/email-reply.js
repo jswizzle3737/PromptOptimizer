@@ -182,7 +182,7 @@ byId('reply-form').addEventListener('submit', async event => {
         status(replyStatus, 'Waiting for your approval.');
         const approved = await notice.ask(details);
         if (approved) status(replyStatus, 'Drafting with ' + ENGINE_LABELS[details.engine] + '…');
-        return approved;
+        return { approved, remember: approved && notice.remembered() };
       },
       onToken(delta) { result.value += delta; }
     });

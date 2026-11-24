@@ -317,6 +317,24 @@ async function runFromSender(payload, sender, controller, io = {}) {
   }
 }
 
+/* "Don't ask again" for email sends: provider + destination per surface, kept
+   in session storage (extension-only, cleared when Chrome restarts). */
+const APPROVALS_KEY = 'promptcraft_send_approvals';
+
+async function rememberedApprovals() {
+  try {
+    const { [APPROVALS_KEY]: list } = await chrome.storage.session.get(APPROVALS_KEY);
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
+
+async function rememberApproval(key) {
+  const list = await rememberedApprovals();
+  if (!list.includes(key)) await chrome.storage.session.set({ [APPROVALS_KEY]: [...list, key] });
+}
+
 /**
  * Run one request from the popup or a page.
  * payload.action: 'optimize' (default) | 'refine' | 'clarify' | 'repair'.
@@ -343,13 +361,23 @@ async function runRequest(payload = {}, sender, io = {}) {
   const senderHost = (() => {
     try { return new URL(sender?.tab?.url || '').hostname; } catch { return null; }
   })();
+  // Email work may skip a repeat notice for the same provider until Chrome restarts.
+  const rememberSurface = gmail ? 'Gmail' : email ? 'Email replies' : '';
   const common = {
     frameworkId, engine, host: senderHost || host, ...io,
     async beforeSend({ engine: destination, model, origin, fallback, systemPrompt, userMessage }) {
       const secrets = [...new Set([...detectSecrets(systemPrompt), ...detectSecrets(userMessage)])];
       if (!email && !fallback && !secrets.length) return;
-      const approved = await io.requestApproval?.({ engine: destination, model, origin, fallback, secrets, ...(email && { email: emailScope }) });
-      if (!approved || io.signal?.aborted) throw new CancelledError();
+      // A credential warning or a fallback to another provider always asks.
+      const rememberKey = rememberSurface && !fallback && !secrets.length ? `${rememberSurface}|${destination}|${origin}` : '';
+      if (rememberKey && (await rememberedApprovals()).includes(rememberKey)) return;
+      const answer = await io.requestApproval?.({
+        engine: destination, model, origin, fallback, secrets,
+        ...(email && { email: emailScope }),
+        ...(rememberKey && { rememberable: rememberSurface })
+      });
+      if (!answer?.approved || io.signal?.aborted) throw new CancelledError();
+      if (rememberKey && answer.remember) await rememberApproval(rememberKey);
     }
   };
 
@@ -432,7 +460,7 @@ chrome.runtime.onConnect.addListener(port => {
     if (msg?.type === 'approval' && pendingApproval?.id === msg.id) {
       const { resolve } = pendingApproval;
       pendingApproval = null;
-      resolve(msg.approved === true);
+      resolve({ approved: msg.approved === true, remember: msg.approved === true && msg.remember === true });
       return;
     }
     if (msg?.type !== 'start' || started) return;
