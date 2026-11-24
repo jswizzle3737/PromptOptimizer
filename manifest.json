@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "PromptOptimizer",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "minimum_chrome_version": "116",
   "description": "Turn rough prompts into structured, high-performance ones, right inside ChatGPT, Claude, Gemini, Perplexity, Grok, Copilot and more.",
   "icons": {
