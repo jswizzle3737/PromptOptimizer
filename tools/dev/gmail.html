@@ -1,0 +1,54 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Mock Gmail</title>
+<style>body{font:14px sans-serif;margin:16px} [role=main],[role=dialog]{border:1px solid #999;padding:8px;margin-bottom:12px} [contenteditable]{border:1px dashed #666;min-height:60px;padding:6px;white-space:pre-wrap}</style>
+<script>
+  // Stand-in for the extension APIs; the worker's replies are scripted per task.
+  window.sent = [];
+  const replies = {
+    reply: { draft: 'Hi Sam,\n\nFriday at 3 works. I will send the deck beforehand.' },
+    compose: { draft: 'Hi team,\n\nPlease send me the Q4 numbers by Monday.', subject: 'Q4 numbers' },
+    polish: { draft: 'POLISHED TEXT' },
+    revise: { draft: 'REVISED TEXT' },
+    summary: { draft: 'Key points\n- Meeting proposed for Friday at 3\nAsked of you\n- Send the deck\nDates and deadlines\n- Friday 3 pm' }
+  };
+  window.chrome = { runtime: {
+    getURL: f => '/' + f,
+    sendMessage: async () => ({ success: true, state: { sites: [location.origin] } }),
+    onMessage: { addListener() {} },
+    connect() {
+      const listeners = [];
+      const emit = m => setTimeout(() => listeners.forEach(l => l(m)), 30);
+      return {
+        onMessage: { addListener: l => listeners.push(l) },
+        onDisconnect: { addListener() {} },
+        disconnect() {},
+        postMessage(m) {
+          if (m.type === 'start') {
+            window.sent.push(m.payload);
+            emit({ type: 'approval', id: 1, details: { engine: 'openai', model: 'gpt', email: 'This sends test data.' } });
+            this._task = m.payload.task;
+          } else if (m.type === 'approval') {
+            if (!m.approved) return emit({ type: 'cancelled' });
+            emit({ type: 'start', engine: 'openai' });
+            setTimeout(() => emit({ type: 'done', data: replies[this._task] }), 60);
+          } else if (m.type === 'cancel') emit({ type: 'cancelled' });
+        }
+      };
+    }
+  } };
+</script>
+</head><body>
+<div role="main">
+  <div class="adn"><span class="gD">Sam Lee</span><span class="g3" title="Tue, Nov 24, 2026, 9:14 AM">9:14 AM</span><div class="a3s">Can we meet Friday at 3? Please send the deck.</div></div>
+  <div><div contenteditable="true" role="textbox" g_editable="true" id="reply">confirm friday<div class="gmail_signature">-- Alex</div></div></div>
+</div>
+<div role="dialog" id="popout">
+  <input name="subjectbox" value="Re: Friday" placeholder="Subject">
+  <div><div contenteditable="true" role="textbox" g_editable="true" id="popreply">sounds good</div></div>
+</div>
+<div role="dialog" style="background:#1f1f1f;color:#eee">
+  <input name="subjectbox" id="subject" placeholder="Subject">
+  <div><div contenteditable="true" role="textbox" g_editable="true" id="compose">ask team for q4 numbers by monday</div></div>
+</div>
+<script src="/content/gmail-replies.js"></script>
+</body></html>

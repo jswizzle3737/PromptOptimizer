@@ -1,0 +1,12 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Mock AI chat</title>
+<script src="/__test/chrome-mock.js"></script>
+<style>body{font:15px sans-serif;margin:0;background:#f4f4f5} main{max-width:760px;margin:40px auto;padding:0 16px} textarea{width:100%;height:90px;font:inherit;padding:10px;border-radius:12px;border:1px solid #ccc}</style>
+</head><body>
+<main><h2>Mock chat</h2><p>Stand-in page for the in-page panel.</p>
+<textarea id="chat" placeholder="Message">write a launch plan for a podcast app</textarea></main>
+<script src="/content/content.js"></script>
+<script>
+  window.openPanel = () => (window.__mockMessageListeners || []).forEach(l => l({ type: 'OPEN_OPTIMIZER_MODAL', payload: { text: 'write a launch plan for a podcast app' } }, {}, () => {}));
+</script>
+</body></html>
